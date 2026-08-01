@@ -460,7 +460,8 @@ impl TransactionStore {
         // would silently truncate and misalign the result with the caller's items.
         if block_numbers.len() != transaction_indices.len() || block_numbers.len() != masks.len() {
             return Err(napi::Error::from_reason(format!(
-                "materialize column length mismatch: block_numbers={}, transaction_indices={}, masks={}",
+                "materialize column length mismatch: block_numbers={}, transaction_indices={}, \
+                 masks={}",
                 block_numbers.len(),
                 transaction_indices.len(),
                 masks.len()
@@ -658,12 +659,7 @@ mod tests {
         }
     }
 
-    fn column<'a>(cols: &'a Columns, name: &str) -> Option<&'a Column> {
-        cols.columns
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, c)| c)
-    }
+    use crate::field_columns::test_support::column;
 
     fn bit(field: EvmTxField) -> u64 {
         1u64 << (field as u32)

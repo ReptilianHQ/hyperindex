@@ -13,7 +13,7 @@ let computeChainsState = (chainStates: dict<ChainState.t>): Internal.chains => {
   values->Array.forEach(cs => {
     let chainId = (cs->ChainState.chainConfig).id
     chains->Dict.set(
-      chainId->Int.toString,
+      chainId->ChainId.toString,
       {
         Internal.id: chainId,
         isRealtime,
@@ -280,7 +280,7 @@ let registerProcessEventBatchMetrics = (
   batch.progressedChainsById->Dict.forEachWithKey((chainAfterBatch, chainId) => {
     logger->Logging.childTrace({
       "msg": "Finished processing",
-      "chainId": chainId->Int.fromString->Option.getUnsafe,
+      "chainId": chainId,
       "batchSize": chainAfterBatch.batchSize,
       "progress": chainAfterBatch.progressBlockNumber,
     })
@@ -312,7 +312,7 @@ let materializeBatchEvents = async (
   | _ =>
     let itemsByChain: dict<array<Internal.item>> = Dict.make()
     batch.items->Array.forEach(item => {
-      let chainId = item->Internal.getItemChainId->Int.toString
+      let chainId = item->Internal.getItemChainId->ChainId.toString
       switch itemsByChain->Utils.Dict.dangerouslyGetNonOption(chainId) {
       | Some(items) => items->Array.push(item)
       | None => itemsByChain->Dict.set(chainId, [item])
@@ -345,39 +345,39 @@ let processEventBatch = async (
   batch.progressedChainsById->Dict.forEachWithKey((chainAfterBatch, chainId) => {
     logger->Logging.childTrace({
       "msg": "Started processing",
-      "chainId": chainId->Int.fromString->Option.getUnsafe,
+      "chainId": chainId,
       "batchSize": chainAfterBatch.batchSize,
     })
   })
 
   try {
     // Backpressure: keep processing within keepLatestChangesLimit of the cycle.
-    await indexerState->Writing.awaitCapacity
+    await RuntimeHooks.tracePhase("capacity_wait", () => indexerState->Writing.awaitCapacity)
 
     let timeRef = Performance.now()
 
     if batch.items->Utils.Array.notEmpty {
       // Materialise store-backed transactions onto payloads before any handler
       // (preload or execute) reads them.
-      await materializeBatchEvents(batch, ~chainStates, ~ecosystem=config.ecosystem.name)
-      await batch->preloadBatchOrThrow(~loadManager, ~persistence, ~indexerState, ~chains, ~config)
+      await RuntimeHooks.tracePhase("materialize", () =>
+        materializeBatchEvents(batch, ~chainStates, ~ecosystem=config.ecosystem.name)
+      )
+      await RuntimeHooks.tracePhase("preload", () =>
+        batch->preloadBatchOrThrow(~loadManager, ~persistence, ~indexerState, ~chains, ~config)
+      )
     }
 
     let elapsedTimeAfterLoaders = timeRef->Performance.secondsSince
 
     if batch.items->Utils.Array.notEmpty {
-      await batch->runBatchHandlersOrThrow(
-        ~indexerState,
-        ~loadManager,
-        ~persistence,
-        ~config,
-        ~chains,
+      await RuntimeHooks.tracePhase("handlers", () =>
+        batch->runBatchHandlersOrThrow(~indexerState, ~loadManager, ~persistence, ~config, ~chains)
       )
     }
 
     let elapsedTimeAfterProcessing = timeRef->Performance.secondsSince
 
-    indexerState->Writing.commitBatch(~batch)
+    RuntimeHooks.tracePhase("queue", () => indexerState->Writing.commitBatch(~batch))
 
     let loaderDuration = elapsedTimeAfterLoaders
     let handlerDuration = elapsedTimeAfterProcessing -. loaderDuration

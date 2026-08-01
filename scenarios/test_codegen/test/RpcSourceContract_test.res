@@ -2,7 +2,7 @@ open Vitest
 
 type sourceFactory = RpcSource.options => Source.t
 
-let chain = ChainMap.Chain.makeUnsafe(~chainId=1)
+let chainId = 1->ChainId.fromInt
 let sighash = "0xcf16a92280c1bbb43f72d31126b724d508df2877835849e8744017ab36a9b47f"
 let transactionHash = "0x27e26f21f744064a4af53810d8002bbd7208a2ca4865503a99b9c529e5cff5ea"
 let contractAddress = "0x00000000000000000000000000000000000000AA"
@@ -68,27 +68,38 @@ let syncConfig = EvmChain.getSyncConfig({
   queryTimeoutMillis: 1_000,
 })
 
+// One store per registration, holding the single emitter these pins query for.
+let makeAddressStore = (~registration: Internal.evmOnEventRegistration) =>
+  TestAddresses.makeStore(
+    ~onEventRegistrations=[(registration :> Internal.onEventRegistration)],
+    ~addresses=[
+      {address, contractName: registration.eventConfig.contractName, registrationBlock: -1},
+    ],
+    // The source lowercases addresses, so the set must render them that way for
+    // the pinned eth_getLogs request bodies to match.
+    ~shouldChecksum=false,
+  )
+
 let makeSource = (~factory, ~url, ~registration: Internal.evmOnEventRegistration) => {
   let options: RpcSource.options = {
     url,
-    chain,
+    chainId,
     onEventRegistrations: [registration],
     sourceFor: Sync,
     syncConfig,
     lowercaseAddresses: true,
+    addressStore: makeAddressStore(~registration),
   }
   factory(options)
 }
 
 let invoke = (source: Source.t, ~registration: Internal.evmOnEventRegistration, ~retry=0) => {
-  let addressesByContractName = Dict.fromArray([
-    (registration.eventConfig.contractName, [address]),
-  ])
   source.getItemsOrThrow(
     ~fromBlock=100,
     ~toBlock=Some(100),
-    ~addressesByContractName,
-    ~contractNameByAddress=FetchState.deriveContractNameByAddress(addressesByContractName),
+    ~addressSet=makeAddressStore(~registration)->AddressStore.makeSet(
+      ~contractName=registration.eventConfig.contractName,
+    ),
     ~knownHeight=100,
     ~partitionId="pin-partition",
     ~selection={
@@ -417,26 +428,24 @@ let registerContractTests = (~name, ~factory: sourceFactory) => {
         ],
         async mock => {
           let registration = makeRegistration()
+          let addressStore = makeAddressStore(~registration)
           let options: RpcSource.options = {
             url: mock.url,
-            chain,
+            chainId,
             onEventRegistrations: [registration],
             sourceFor: Sync,
             syncConfig: defaultSyncConfig,
             lowercaseAddresses: true,
+            addressStore,
           }
           let source = factory(options)
-          let addressesByContractName = Dict.fromArray([
-            (registration.eventConfig.contractName, [address]),
-          ])
           let call = () =>
             RpcSourcePins.capture(() =>
               source.getItemsOrThrow(
                 ~fromBlock=0,
                 ~toBlock=Some(1_000_000),
-                ~addressesByContractName,
-                ~contractNameByAddress=FetchState.deriveContractNameByAddress(
-                  addressesByContractName,
+                ~addressSet=addressStore->AddressStore.makeSet(
+                  ~contractName=registration.eventConfig.contractName,
                 ),
                 ~knownHeight=1_000_000,
                 ~partitionId="pin-partition",
@@ -577,8 +586,7 @@ let registerContractTests = (~name, ~factory: sourceFactory) => {
             source.getItemsOrThrow(
               ~fromBlock=100,
               ~toBlock=Some(100),
-              ~addressesByContractName=Dict.make(),
-              ~contractNameByAddress=Dict.make(),
+              ~addressSet=makeAddressStore(~registration)->AddressStore.emptySet,
               ~knownHeight=100,
               ~partitionId="skip-all",
               ~selection={
@@ -677,27 +685,34 @@ let registerContractTests = (~name, ~factory: sourceFactory) => {
           ),
         ],
         async mock => {
+          let addressStore = TestAddresses.makeStore(
+            ~onEventRegistrations=[
+              (eventA :> Internal.onEventRegistration),
+              (eventB :> Internal.onEventRegistration),
+            ],
+            ~addresses=[
+              {address: addressA, contractName: "ContractA", registrationBlock: -1},
+              {address: addressB, contractName: "ContractB", registrationBlock: -1},
+            ],
+            ~shouldChecksum=false,
+          )
           let options: RpcSource.options = {
             url: mock.url,
-            chain,
+            chainId,
             onEventRegistrations: [eventA, eventB],
             sourceFor: Sync,
             syncConfig,
             lowercaseAddresses: true,
+            addressStore,
           }
           let source = factory(options)
-          let addressesByContractName = Dict.fromArray([
-            ("ContractA", [addressA]),
-            ("ContractB", [addressB]),
-          ])
           switch await RpcSourcePins.capture(() =>
             source.getItemsOrThrow(
               ~fromBlock=100,
               ~toBlock=Some(100),
-              ~addressesByContractName,
-              ~contractNameByAddress=FetchState.deriveContractNameByAddress(
-                addressesByContractName,
-              ),
+              ~addressSet=addressStore
+              ->AddressStore.makeSet(~contractName="ContractA")
+              ->AddressSet.merge(addressStore->AddressStore.makeSet(~contractName="ContractB")),
               ~knownHeight=100,
               ~partitionId="contract-scope",
               ~selection={

@@ -20,9 +20,6 @@ contracts:
       - event: Transfer()
 chains:
   - id: 1
-    rpc:
-      url: https://eth.com
-      for: sync
     start_block: 0
     contracts:
       - name: ${contractName}
@@ -82,9 +79,6 @@ chains:
 name: virtual-abi
 chains:
   - id: 1
-    rpc:
-      url: https://rpc.example.test
-      for: sync
     start_block: 0
     contracts:
       - name: Token
@@ -144,8 +138,8 @@ describe("EVM config YAML", () => {
 
   ["checksum", "lowercase"]->Array.forEach(addressFormat => {
     it(`rejects invalid addresses with address_format: ${addressFormat}`, t => {
-      t.expect(() => parseAddressConfig(~addressFormat, "0xfoo")->ignore).toThrowError(
-        `Contract "ERC20" on chain 1 has invalid address "0xfoo"`,
+      t->toThrowErrorEqual(() => parseAddressConfig(~addressFormat, "0xfoo")->ignore, 
+        `Config parse error: Contract "ERC20" on chain 1 has invalid address "0xfoo". Expected a 20-byte hex string starting with 0x.`,
       )
     })
   })
@@ -916,9 +910,6 @@ contracts:
       - event: Transfer(address indexed from, address indexed to, uint256 value)
 chains:
   - id: 1
-    rpc:
-      url: https://eth.com
-      for: sync
     start_block: 0
     contracts:
       - name: ERC20
@@ -944,9 +935,6 @@ contracts:
       - event: Transfer(address indexed from, address indexed to, uint256 value)
 chains:
   - id: 1
-    rpc:
-      url: https://eth.com
-      for: sync
     start_block: 0
     contracts:
       - name: Token
@@ -967,7 +955,7 @@ chains:
 `)
     let chain = config.chainMap->ChainMap.values->Array.getUnsafe(0)
     t.expect(config.ecosystem.name).toEqual(Ecosystem.Fuel)
-    t.expect((chain.id, chain.startBlock)).toEqual((0, 7))
+    t.expect((chain.id->ChainId.toString, chain.startBlock)).toEqual(("0", 7))
   })
 
   it("parses a minimal SVM config through the public boundary", t => {
@@ -980,7 +968,7 @@ chains:
 `)
     let chain = config.chainMap->ChainMap.values->Array.getUnsafe(0)
     t.expect(config.ecosystem.name).toEqual(Ecosystem.Svm)
-    t.expect((chain.id, chain.startBlock)).toEqual((0, 8))
+    t.expect((chain.id->ChainId.toString, chain.startBlock)).toEqual(("0", 8))
   })
 
   it("validates event field selections against only the chain that uses them", t => {
@@ -1043,7 +1031,7 @@ chains:
 `)
     let chain = config.chainMap->ChainMap.values->Array.getUnsafe(0)
     t.expect(config.chainMap->ChainMap.values->Array.length).toBe(1)
-    t.expect(chain.id).toBe(137)
+    t.expect(chain.id->ChainId.toString).toBe("137")
     t.expect(chain.startBlock).toBe(2000)
   })
 
@@ -1826,6 +1814,29 @@ chains:
     start_block: 0
 `,
       "Config parse error: Schema validation failed:\n\nMultiple entity fields map to the same database column:\n  - \`Token\`: fields \`tokenId\`, \`token_id\` all map to the \"token_id\" column.\n\nFixes:\n  - Rename the conflicting fields in schema.graphql so they map to distinct columns. Note that entity reference fields get an \`_id\` suffix, and \`column_name_format: snake_case\` converts field names to snake_case.",
+    ),
+    (
+      "rejects a derivedFrom pointing at an entity that isn't in postgres",
+      `
+type Trader @storage(postgres: true) {
+  id: ID!
+  orders: [Order!]! @derivedFrom(field: "trader")
+}
+type Order @storage(clickhouse: true) {
+  id: ID!
+  trader: Trader!
+}
+`,
+      `
+name: cross-storage-relationship
+storage:
+  postgres: true
+  clickhouse: true
+chains:
+  - id: 1
+    start_block: 0
+`,
+      "Config parse error: Schema validation failed:\n\n@derivedFrom relationships between entities that don't share the postgres storage:\n  - \`Trader\`.\`orders\` derives from \`Order\`, which is not stored in postgres.\n\nFixes:\n  - Add postgres to the @storage directive of the referenced entities, or\n  - Remove the @derivedFrom fields listed above.",
     ),
   ]->Array.forEach(((name, schema, yaml, message)) => {
     it(name, t => expectParseError(t, ~schema, yaml, message))

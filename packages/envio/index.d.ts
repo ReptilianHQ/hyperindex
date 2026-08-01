@@ -48,8 +48,7 @@ export type EffectCaller = <I, O>(
   input: I extends undefined ? undefined : I
 ) => Promise<O>;
 
-/** The chain an Effect was called on. Available only on chain-scoped effects
- * (`crossChain: false`). */
+/** The chain an Effect was called on. Available only on chain-scoped effects. */
 export type EffectChain = {
   /** The chain id the effect handler was called on. */
   readonly id: number;
@@ -64,8 +63,8 @@ export type EffectContext = {
   /** Whether to cache this call's result. Defaults to the effect's `cache`
    * option; set to `false` to skip caching for this specific invocation. */
   cache: boolean;
-  /** The chain the effect was called on. Only available on effects created with
-   * `crossChain: false`; accessing it on a cross-chain effect throws. */
+  /** The chain the effect was called on. Only available on chain-scoped
+   * effects; accessing it on a cross-chain effect throws. */
   readonly chain: EffectChain;
 };
 
@@ -93,9 +92,10 @@ export type EffectOptions<Input, Output> = {
   /** Whether the effect should be cached. */
   readonly cache?: boolean;
   /** Whether the effect's cache is shared across all chains. Defaults to
-   * `true`. Set to `false` to isolate the cache and rate limiting per chain and
-   * enable `context.chain.id` inside the handler. Changing this changes the
-   * effect's cache identity. */
+   * `true`, or to `false` when config.yaml sets
+   * `disable_default_cross_chain: true`. Set to `false` to isolate the cache
+   * and rate limiting per chain and enable `context.chain.id` inside the
+   * handler. Changing this changes the effect's cache identity. */
   readonly crossChain?: boolean;
 };
 
@@ -225,8 +225,10 @@ export function createEffect<
     /** Whether the effect should be cached. */
     readonly cache?: boolean;
     /** Whether the effect's cache is shared across all chains. Defaults to
-     * `true`. Set to `false` to isolate the cache and rate limiting per chain
-     * and enable `context.chain.id` inside the handler. */
+     * `true`, or to `false` when config.yaml sets
+     * `disable_default_cross_chain: true`. Set to `false` to isolate the cache
+     * and rate limiting per chain and enable `context.chain.id` inside the
+     * handler. */
     readonly crossChain?: boolean;
   },
   handler: (args: EffectArgs<I>) => Promise<R>
@@ -502,6 +504,8 @@ type IndexerConfigTypes = {
   };
   svm?: { chains: Record<string, { id: number }> };
   entities?: Record<string, object>;
+  // Union of the entity names whose rows belong to a single chain, or `never`.
+  perChainEntities?: string;
   enums?: Record<string, string>;
 };
 
@@ -585,14 +589,18 @@ export type SvmOnSlotContext<Config extends IndexerConfigTypes = GlobalConfig> =
   BaseHandlerContext<Config, SvmChainIds<Config>>
 >;
 
+/** The entity's `id` type. `ID!`/`String!` ids are `string`; `Int!` is `number`
+ * and `BigInt!` is `bigint`, so id-keyed operations accept the real scalar. */
+type EntityId<Entity> = Entity extends { readonly id: infer Id } ? Id : string;
+
 /** Entity operations available in handler contexts. */
 type EntityOperations<Entity> = {
-  readonly get: (id: string) => Promise<Entity | undefined>;
-  readonly getOrThrow: (id: string, message?: string) => Promise<Entity>;
+  readonly get: (id: EntityId<Entity>) => Promise<Entity | undefined>;
+  readonly getOrThrow: (id: EntityId<Entity>, message?: string) => Promise<Entity>;
   readonly getWhere: (filter: GetWhereFilter<Entity>) => Promise<Entity[]>;
   readonly getOrCreate: (entity: Entity) => Promise<Entity>;
   readonly set: (entity: Entity) => void;
-  readonly deleteUnsafe: (id: string) => void;
+  readonly deleteUnsafe: (id: EntityId<Entity>) => void;
 };
 
 /** Contract registration handle. */
@@ -1510,7 +1518,7 @@ type EntityChangeValue<Entity> = {
   /** Entities that were created or updated. */
   readonly sets?: readonly Entity[];
   /** IDs of entities that were deleted. */
-  readonly deleted?: readonly string[];
+  readonly deleted?: readonly EntityId<Entity>[];
 };
 
 /** A dynamic contract address registration. */
@@ -1525,14 +1533,33 @@ type AddressRegistration = {
 type ConfigEntities<Config extends IndexerConfigTypes = GlobalConfig> =
   Config["entities"] extends Record<string, object> ? Config["entities"] : {};
 
+/** Entity names whose rows belong to a single chain. */
+type PerChainEntityNames<Config extends IndexerConfigTypes = GlobalConfig> =
+  Config extends { perChainEntities: infer Names extends string } ? Names : never;
+
+/** The row shape the chain-agnostic test-indexer operations exchange. A
+ * per-chain entity's row is only identified together with its chain, so the
+ * chain id travels alongside the entity fields. */
+type TestIndexerEntityRow<
+  Config extends IndexerConfigTypes,
+  Name,
+  Entity
+> = Name extends PerChainEntityNames<Config>
+  ? Entity & { readonly chainId: number }
+  : Entity;
+
 /** Entity operations available on test indexer for direct entity manipulation. */
 type TestIndexerEntityOperations<Entity> = {
   /** Get an entity by ID. Returns undefined if not found. */
-  readonly get: (id: string) => Promise<Entity | undefined>;
+  readonly get: (id: EntityId<Entity>) => Promise<Entity | undefined>;
   /** Get an entity by ID or throw if not found. */
-  readonly getOrThrow: (id: string, message?: string) => Promise<Entity>;
+  readonly getOrThrow: (id: EntityId<Entity>, message?: string) => Promise<Entity>;
   /** Get all entities. */
   readonly getAll: () => Promise<Entity[]>;
+  /** Get the entities matching a filter. For a per-chain entity the filter
+   * accepts `chainId`, which is how an id present on several chains is
+   * narrowed to one. */
+  readonly getWhere: (filter: GetWhereFilter<Entity>) => Promise<Entity[]>;
   /** Set (create or update) an entity. */
   readonly set: (entity: Entity) => void;
 };
@@ -1707,7 +1734,7 @@ export type TestIndexerFromConfig<Config extends IndexerConfigTypes = GlobalConf
 } & SingleEcosystemTestChains<Config> & {
   /** Entity operations for direct manipulation outside of handlers. */
   readonly [K in keyof ConfigEntities<Config>]: TestIndexerEntityOperations<
-    ConfigEntities<Config>[K]
+    TestIndexerEntityRow<Config, K, ConfigEntities<Config>[K]>
   >;
 };
 

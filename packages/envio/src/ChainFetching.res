@@ -3,7 +3,7 @@
 // (state + transitions) and leaf effect modules.
 
 type partitionQueryResponse = {
-  chain: IndexerState.chain,
+  chainId: ChainId.t,
   response: Source.blockRangeFetchResponse,
   query: FetchState.query,
 }
@@ -24,25 +24,15 @@ let runContractRegistersOrThrow = async (
     ~ecosystem=config.ecosystem.name,
   )
 
-  let itemsWithDcs = []
+  let registrations: array<AddressStore.registration> = []
 
   let onRegister = (~item: Internal.item, ~contractAddress, ~contractName) => {
     let eventItem = item->Internal.castUnsafeEventItem
-    let {blockNumber} = eventItem
-
-    let dc: Internal.indexingAddress = {
+    registrations->Array.push({
       address: contractAddress,
       contractName,
-      registrationBlock: blockNumber,
-    }
-
-    switch item->Internal.getItemDcs {
-    | None => {
-        item->Internal.setItemDcs([dc])
-        itemsWithDcs->Array.push(item)
-      }
-    | Some(dcs) => dcs->Array.push(dc)
-    }
+      registrationBlock: eventItem.blockNumber,
+    })
   }
 
   let promises = []
@@ -101,12 +91,12 @@ let runContractRegistersOrThrow = async (
     let _ = await Promise.all(promises)
   }
 
-  itemsWithDcs
+  registrations
 }
 
 let rec onQueryResponse = async (
   state: IndexerState.t,
-  {chain, response, query}: partitionQueryResponse,
+  {chainId, response, query}: partitionQueryResponse,
   ~stateId,
   ~scheduleFetch,
   ~scheduleProcessing,
@@ -115,7 +105,7 @@ let rec onQueryResponse = async (
   if state->IndexerState.isStale(~stateId) {
     ()
   } else {
-    let chainState = state->IndexerState.getChainState(~chain)
+    let chainState = state->IndexerState.getChainState(~chainId)
     let {
       parsedQueueItems,
       transactionStore,
@@ -142,7 +132,7 @@ let rec onQueryResponse = async (
     if numContractRegisterEvents === 0 {
       Logging.trace({
         "msg": "Finished querying",
-        "chainId": chain->ChainMap.Chain.toChainId,
+        "chainId": chainId,
         "partitionId": query.partitionId,
         "fromBlock": fromBlockQueried,
         "toBlock": latestFetchedBlockNumber,
@@ -151,7 +141,7 @@ let rec onQueryResponse = async (
     } else {
       Logging.trace({
         "msg": "Finished querying",
-        "chainId": chain->ChainMap.Chain.toChainId,
+        "chainId": chainId,
         "partitionId": query.partitionId,
         "fromBlock": fromBlockQueried,
         "toBlock": latestFetchedBlockNumber,
@@ -199,21 +189,22 @@ let rec onQueryResponse = async (
         cs->ChainState.prepareReorg(
           ~eventsProcessedDiff=switch eventsProcessedDiffByChain {
           | Some(byChain) =>
-            byChain->Utils.Dict.dangerouslyGetByIntNonOption((cs->ChainState.chainConfig).id)
+            byChain->ChainId.Dict.dangerouslyGetNonOption((cs->ChainState.chainConfig).id)
           | None => None
           },
         )
       )
-      state->IndexerState.beginReorg(~chain, ~blockNumber=reorgDetectedBlockNumber)
+      state->IndexerState.beginReorg(~chainId, ~blockNumber=reorgDetectedBlockNumber)
       // Advances synchronously to FindingReorgDepth, so a concurrent rollback
       // kick (eg from the processing loop quiescing) collapses into this one.
       scheduleRollback()
     | None =>
-      // Drop over-fetched events (a merged partition returning an address before
-      // its effectiveStartBlock, or a wildcard param referencing an address
-      // registered after the log's block) before contract registration, so they
-      // neither spawn dynamic contracts nor enter the buffer.
-      let newItems = chainState->ChainState.filterByClientAddress(parsedQueueItems)
+      // Over-fetched events (a merged partition returning an address before its
+      // effectiveStartBlock, a wildcard param referencing an address registered
+      // after the log's block, or a registration whose own start block is later
+      // than its contract's) are already dropped by the source's native gates,
+      // so everything here is indexable.
+      let newItems = parsedQueueItems
       let itemsWithContractRegister = []
       for idx in 0 to newItems->Array.length - 1 {
         let item = newItems->Array.getUnsafe(idx)
@@ -225,13 +216,13 @@ let rec onQueryResponse = async (
 
       // Re-check staleness: contract registration is async, so the chain state
       // may have rolled back by the time we apply the fetched items.
-      let proceed = (~newItemsWithDcs) =>
+      let proceed = (~newRegistrations) =>
         if !(state->IndexerState.isStale(~stateId)) {
           applyQueryResponse(
             state,
-            ~chain,
+            ~chainId,
             ~newItems,
-            ~newItemsWithDcs,
+            ~newRegistrations,
             ~knownHeight,
             ~latestFetchedBlock={
               FetchState.blockNumber: latestFetchedBlockNumber,
@@ -247,7 +238,7 @@ let rec onQueryResponse = async (
         }
 
       switch itemsWithContractRegister {
-      | [] => proceed(~newItemsWithDcs=[])
+      | [] => proceed(~newRegistrations=[])
       | _ =>
         switch await runContractRegistersOrThrow(
           ~itemsWithContractRegister,
@@ -256,7 +247,7 @@ let rec onQueryResponse = async (
           ~blockStore,
         ) {
         | exception exn => IndexerState.errorExit(state, exn->ErrorHandling.make)
-        | newItemsWithDcs => proceed(~newItemsWithDcs)
+        | newRegistrations => proceed(~newRegistrations)
         }
       }
     }
@@ -264,23 +255,23 @@ let rec onQueryResponse = async (
 
 and applyQueryResponse = (
   state: IndexerState.t,
-  ~chain,
+  ~chainId,
   ~newItems,
-  ~newItemsWithDcs,
+  ~newRegistrations,
   ~knownHeight,
   ~latestFetchedBlock,
   ~query,
   ~transactionStore,
   ~blockStore,
 ) => {
-  let chainState = state->IndexerState.getChainState(~chain)
+  let chainState = state->IndexerState.getChainState(~chainId)
   let wasFetchingAtHead = chainState->ChainState.isFetchingAtHead
 
   chainState->ChainState.handleQueryResult(
     ~query,
     ~latestFetchedBlock,
     ~newItems,
-    ~newItemsWithDcs,
+    ~newRegistrations,
     ~knownHeight,
     ~transactionStore,
     ~blockStore,
@@ -307,7 +298,7 @@ and applyQueryResponse = (
 
 let finishWaitingForNewBlock = (
   state: IndexerState.t,
-  ~chain,
+  ~chainId,
   ~knownHeight,
   ~stateId,
   ~scheduleFetch,
@@ -316,7 +307,7 @@ let finishWaitingForNewBlock = (
   if state->IndexerState.isStale(~stateId) {
     ()
   } else {
-    let chainState = state->IndexerState.getChainState(~chain)
+    let chainState = state->IndexerState.getChainState(~chainId)
     chainState->ChainState.updateKnownHeight(~knownHeight)
 
     // No reorg-threshold check here: scheduleProcessing always runs at least one
@@ -327,14 +318,14 @@ let finishWaitingForNewBlock = (
 
 let fetchChain = async (
   state: IndexerState.t,
-  chain,
+  chainId,
   ~action,
   ~stateId,
   ~scheduleFetch,
   ~scheduleProcessing,
   ~scheduleRollback,
 ) => {
-  let chainState = state->IndexerState.getChainState(~chain)
+  let chainState = state->IndexerState.getChainState(~chainId)
   if !(state->IndexerState.isResolvingReorg) && !(state->IndexerState.isStopped) {
     let isRealtime = state->IndexerState.isRealtime
     let sourceManager = chainState->ChainState.sourceManager
@@ -352,7 +343,7 @@ let fetchChain = async (
         ~onNewBlock=(~knownHeight) =>
           finishWaitingForNewBlock(
             state,
-            ~chain,
+            ~chainId,
             ~knownHeight,
             ~stateId,
             ~scheduleFetch,
@@ -370,7 +361,7 @@ let fetchChain = async (
             )
             await onQueryResponse(
               state,
-              {chain, response, query},
+              {chainId, response, query},
               ~stateId,
               ~scheduleFetch,
               ~scheduleProcessing,
