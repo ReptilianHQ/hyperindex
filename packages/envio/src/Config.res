@@ -1270,7 +1270,9 @@ let rec canonicalJson = (json: JSON.t): JSON.t =>
 
 // Returns dotted leaf paths (`a.b[i].c`) where `stored` differs from
 // `current`, restricted to the highest-priority top-level tier with any
-// diff. Tiers in order: version → name → storage → ecosystem
+// diff. The serialized config version is informational during resume; the
+// structural tiers below decide whether existing data is compatible. Tiers in
+// order: chainIdMode → name → storage → ecosystem
 // (evm/fuel/svm) → entities → other top-level keys. The first tier
 // containing a diff is the only one rendered; lower tiers are silenced
 // so a single noisy section doesn't bury the actionable change.
@@ -1333,11 +1335,11 @@ let diffPaths = (~stored: JSON.t, ~current: JSON.t): array<string> => {
 
   switch (stored, current) {
   | (Object(sObj), Object(cObj)) =>
-    // chainIdMode sits right after version: it decides the physical type of
-    // every chain-id column, so a change to it is reported on its own rather
-    // than buried under the chain diffs that always accompany it.
+    // A package/config-format upgrade can change version without changing the
+    // stored data contract. Compare the structural fields instead so a
+    // version-only upgrade resumes safely. chainIdMode remains first because
+    // it decides the physical type of every chain-id column.
     let tiers = [
-      ["version"],
       ["chainIdMode"],
       ["name"],
       ["storage"],
@@ -1357,7 +1359,7 @@ let diffPaths = (~stored: JSON.t, ~current: JSON.t): array<string> => {
     switch firstHit {
     | Some(hits) => runTier(hits)
     | None =>
-      let knownSet = Utils.Set.fromArray(tiers->Array.flat)
+      let knownSet = Utils.Set.fromArray(Array.concat(["version"], tiers->Array.flat))
       let extras =
         Utils.Set.fromArray(Array.concat(sObj->Dict.keysToArray, cObj->Dict.keysToArray))
         ->Utils.Set.toArray
