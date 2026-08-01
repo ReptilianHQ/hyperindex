@@ -301,7 +301,7 @@ type genericEvent<'params, 'block, 'transaction> = {
   contractName: string,
   eventName: string,
   params: 'params,
-  chainId: int,
+  chainId: ChainId.t,
   srcAddress: Address.t,
   logIndex: int,
   transaction: 'transaction,
@@ -333,6 +333,11 @@ type eventPayload
 // The log's emitting address (EVM/Fuel; the program id carries it for SVM).
 @get external getPayloadSrcAddress: eventPayload => Address.t = "srcAddress"
 
+// The decoded params, read by name for the address-valued ones a `where`
+// filters on. Only those names are ever looked up, so the address type is
+// accurate at every use site.
+@get external getPayloadAddressParams: eventPayload => dict<Address.t> = "params"
+
 type genericLoaderArgs<'event, 'context> = {
   event: 'event,
   context: 'context,
@@ -356,15 +361,15 @@ type genericHandlerArgs<'event, 'context> = {
 type genericHandler<'args> = 'args => promise<unit>
 
 type entityHandlerContext<'entity> = {
-  get: string => promise<option<'entity>>,
-  getOrThrow: (string, ~message: string=?) => promise<'entity>,
+  get: EntityId.t => promise<option<'entity>>,
+  getOrThrow: (EntityId.t, ~message: string=?) => promise<'entity>,
   getOrCreate: 'entity => promise<'entity>,
   set: 'entity => unit,
-  deleteUnsafe: string => unit,
+  deleteUnsafe: EntityId.t => unit,
 }
 
 type chainInfo = {
-  id: int,
+  id: ChainId.t,
   // True once every chain has caught up to head/endBlock and entered real-time
   // indexing mode. False while any chain is still backfilling.
   isRealtime: bool,
@@ -572,11 +577,15 @@ type onEventRegistration = {
   // Usually always false for wildcard events, but might be true for a wildcard
   // event with a dynamic event filter by addresses.
   dependsOnAddresses: bool,
-  // Precompiled predicate for events that filter an indexed address param by
-  // registered addresses (see `EventConfigBuilder.buildAddressFilter`); drops a
-  // decoded event whose param-address isn't registered at/before the log's
-  // block. Absent otherwise.
-  clientAddressFilter?: (eventPayload, int, dict<indexingContract>) => bool,
+  // Indexed address params this event filters on, in disjunctive normal form
+  // (OR of AND-groups), from `where: {params: {to: chain.C.addresses}}`. Every
+  // source applies this natively while routing; it's carried here for the
+  // simulate source, which has no native query boundary. Absent otherwise.
+  //
+  // Keep it optional: with every field required, ReScript compiles a
+  // `{...registration, ...}` spread into an explicit field-by-field copy, which
+  // drops the ecosystem-only fields an `evmOnEventRegistration` carries.
+  addressFilterParamGroups?: array<array<string>>,
   // Final start block: the contract/chain config value, overridden by a
   // `where.block.number._gte` when the registered `where` supplies one.
   startBlock: option<int>,
@@ -615,7 +624,7 @@ type dcs = array<indexingAddress>
 type eventItem = private {
   kind: [#0],
   onEventRegistration: onEventRegistration,
-  chain: ChainMap.Chain.t,
+  chainId: ChainId.t,
   blockNumber: int,
   logIndex: int,
   // Within-block transaction index — the key into the per-chain transaction
@@ -628,7 +637,7 @@ type eventItem = private {
 // `InternalTable`) so the ecosystem's `toRawEvent` can reference it without
 // pulling in `InternalTable`'s dependency on `Config`.
 type rawEvent = {
-  chain_id: int,
+  chain_id: ChainId.t,
   event_id: bigint,
   event_name: string,
   contract_name: string,
@@ -656,7 +665,7 @@ type onBlockRegistration = {
   // we want to use the order they are defined for sorting
   index: int,
   name: string,
-  chainId: int,
+  chainId: ChainId.t,
   startBlock: option<int>,
   endBlock: option<int>,
   interval: int,
@@ -668,7 +677,7 @@ type item =
   | @as(0)
   Event({
       onEventRegistration: onEventRegistration,
-      chain: ChainMap.Chain.t,
+      chainId: ChainId.t,
       blockNumber: int,
       logIndex: int,
       transactionIndex: int,
@@ -685,7 +694,7 @@ external getItemLogIndex: item => int = "logIndex"
 
 let getItemChainId = item =>
   switch item {
-  | Event({chain}) => chain->ChainMap.Chain.toChainId
+  | Event({chainId})
   | Block({onBlockRegistration: {chainId}}) => chainId
   }
 
@@ -787,7 +796,7 @@ type effect = {
 @unboxed
 type chainScope =
   | @as("crossChain") CrossChain
-  | Chain(int)
+  | Chain(ChainId.t)
 
 let cacheTablePrefix = "envio_effect_"
 
@@ -795,27 +804,29 @@ let cacheTablePrefix = "envio_effect_"
 // canonical Postgres cache-table name and .envio/cache file path. Everything
 // that needs a cache address goes through here instead of slicing prefixes.
 //   CrossChain  ->  envio_effect_<name>        <name>.tsv
-//   Chain(1)    ->  envio_1_effect_<name>      1/<name>.tsv
-//   Chain(137)  ->  envio_137_effect_<name>    137/<name>.tsv
+//   Chain(1->ChainId.fromInt)    ->  envio_1_effect_<name>      1/<name>.tsv
+//   Chain(137->ChainId.fromInt)  ->  envio_137_effect_<name>    137/<name>.tsv
 module EffectCache = {
   let toTableName = (~effectName, ~scope) =>
     switch scope {
     | CrossChain => cacheTablePrefix ++ effectName
-    | Chain(chainId) => `envio_${chainId->Int.toString}_effect_${effectName}`
+    | Chain(chainId) => `envio_${chainId->ChainId.toString}_effect_${effectName}`
     }
 
   // "crossChain" or the decimal chain id. Used as the `scope` Prometheus label.
   let scopeToString = scope =>
     switch scope {
     | CrossChain => "crossChain"
-    | Chain(chainId) => chainId->Int.toString
+    | Chain(chainId) => chainId->ChainId.toString
     }
 
   // Only accepts a canonical decimal chain id ("7", not "007" or "1foo") —
-  // Int.fromString alone follows parseInt semantics and accepts both.
+  // the schema's parser follows parseFloat semantics and accepts both.
   let parseChainId = str =>
-    switch Int.fromString(str) {
-    | Some(chainId) if chainId >= 0 && chainId->Int.toString === str => Some(chainId)
+    switch try Some(str->ChainId.normalizeOrThrow) catch {
+    | _ => None
+    } {
+    | Some(chainId) if chainId->ChainId.toString === str => Some(chainId)
     | _ => None
     }
 
@@ -855,7 +866,7 @@ module EffectCache = {
   let toCachePath = (~effectName, ~scope) =>
     switch scope {
     | CrossChain => effectName ++ ".tsv"
-    | Chain(chainId) => `${chainId->Int.toString}/${effectName}.tsv`
+    | Chain(chainId) => `${chainId->ChainId.toString}/${effectName}.tsv`
     }
 }
 
@@ -884,7 +895,7 @@ type reorgCheckpoint = {
   @as("id")
   checkpointId: bigint,
   @as("chain_id")
-  chainId: int,
+  chainId: ChainId.t,
   @as("block_number")
   blockNumber: int,
   @as("block_hash")

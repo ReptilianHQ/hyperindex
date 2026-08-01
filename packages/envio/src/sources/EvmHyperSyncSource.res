@@ -6,7 +6,7 @@ open Source
 let isUnauthorizedError = (message: string) => message->String.includes("401 Unauthorized")
 
 type options = {
-  chain: ChainMap.Chain.t,
+  chainId: ChainId.t,
   endpointUrl: string,
   // The chain's registrations, indexed by their sequential `index`.
   onEventRegistrations: array<Internal.evmOnEventRegistration>,
@@ -16,11 +16,13 @@ type options = {
   serializationFormat: HyperSyncClient.serializationFormat,
   enableQueryCaching: bool,
   logLevel: HyperSyncClient.logLevel,
+  // The chain's address index; the client reads it while routing.
+  addressStore: AddressStore.t,
 }
 
 let make = (
   {
-    chain,
+    chainId,
     endpointUrl,
     onEventRegistrations,
     apiToken,
@@ -29,6 +31,7 @@ let make = (
     serializationFormat,
     enableQueryCaching,
     logLevel,
+    addressStore,
   }: options,
 ): t => {
   let name = "HyperSync"
@@ -50,6 +53,7 @@ Learn more or get a free Envio API token at: https://envio.dev/app/api-tokens`)
     ~serializationFormat,
     ~enableQueryCaching,
     ~logLevel,
+    ~addressStore,
   ) {
   | client => client
   | exception exn =>
@@ -66,7 +70,7 @@ Learn more or get a free Envio API token at: https://envio.dev/app/api-tokens`)
 
     Internal.Event({
       onEventRegistration: (onEventRegistration :> Internal.onEventRegistration),
-      chain,
+      chainId,
       blockNumber: item.blockNumber,
       logIndex,
       transactionIndex,
@@ -75,7 +79,7 @@ Learn more or get a free Envio API token at: https://envio.dev/app/api-tokens`)
       payload: {
         contractName: onEventRegistration.eventConfig.contractName,
         eventName: onEventRegistration.eventConfig.name,
-        chainId: chain->ChainMap.Chain.toChainId,
+        chainId: chainId,
         params: item.params,
         srcAddress,
         logIndex,
@@ -86,8 +90,7 @@ Learn more or get a free Envio API token at: https://envio.dev/app/api-tokens`)
   let getItemsOrThrow = async (
     ~fromBlock,
     ~toBlock,
-    ~addressesByContractName,
-    ~contractNameByAddress as _,
+    ~addressSet,
     ~knownHeight,
     ~partitionId as _,
     ~selection: FetchState.selection,
@@ -106,7 +109,7 @@ Learn more or get a free Envio API token at: https://envio.dev/app/api-tokens`)
       ~toBlock,
       ~maxNumLogs=itemsTarget,
       ~registrationIndexes=selection.onEventRegistrations->Array.map(reg => reg.index),
-      ~addressesByContractName,
+      ~addressSet,
       ~clientFilteredContracts=selection.clientFilteredContracts,
     ) catch {
     | HyperSync.GetLogs.Error(error) =>
@@ -250,7 +253,7 @@ Learn more or get a free Envio API token at: https://envio.dev/app/api-tokens`)
       ~client,
       ~blockNumbers,
       ~sourceName=name,
-      ~chainId=chain->ChainMap.Chain.toChainId,
+      ~chainId=chainId,
       ~logger,
     )->Promise.thenResolve(((queryRes, requestStats)) => {
       Source.result: queryRes->HyperSync.mapExn,
@@ -260,7 +263,7 @@ Learn more or get a free Envio API token at: https://envio.dev/app/api-tokens`)
   {
     name,
     sourceFor: Sync,
-    chain,
+    chainId,
     pollingInterval: 100,
     poweredByHyperSync: true,
     getBlockHashes,
@@ -287,7 +290,7 @@ Learn more or get a free Envio API token at: https://envio.dev/app/api-tokens`)
       HyperSyncHeightStream.subscribe(
         ~hyperSyncUrl=endpointUrl,
         ~apiToken,
-        ~chainId=chain->ChainMap.Chain.toChainId,
+        ~chainId=chainId,
         ~onHeight,
       ),
   }

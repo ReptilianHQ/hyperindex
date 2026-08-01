@@ -45,7 +45,10 @@ let setEffectOutput = (
   | Some(_) => ()
   | None => inMemTable.changesCount = inMemTable.changesCount +. 1.
   }
-  inMemTable.dict->Dict.set(cacheKey, Set({entityId: cacheKey, entity: output, checkpointId}))
+  inMemTable.dict->Dict.set(
+    cacheKey,
+    Set({entityId: cacheKey->EntityId.unsafeOfString, entity: output, checkpointId}),
+  )
   if shouldCache {
     inMemTable.idsToStore->Array.push(cacheKey)->ignore
   }
@@ -58,7 +61,11 @@ let initEffectOutputFromDb = (inMemTable: EffectState.effectCacheInMemTable, ~ca
     inMemTable.changesCount = inMemTable.changesCount +. 1.
     inMemTable.dict->Dict.set(
       cacheKey,
-      Set({entityId: cacheKey, entity: output, checkpointId: Internal.loadedFromDbCheckpointId}),
+      Set({
+        entityId: cacheKey->EntityId.unsafeOfString,
+        entity: output,
+        checkpointId: Internal.loadedFromDbCheckpointId,
+      }),
     )
   }
 
@@ -101,7 +108,11 @@ let prepareRollbackDiff = async (
   let deletedEntities = Dict.make()
   let setEntities = Dict.make()
 
+  // Rollback data comes from Postgres entity history, which is kept only for
+  // Postgres-backed entities. ClickHouse-only entities have no history to
+  // restore from, so a reorg leaves them un-reverted in the sink.
   let _ = await persistence.allEntities
+  ->Array.filter(entityConfig => entityConfig.storage.postgres)
   ->Array.map(async entityConfig => {
     let entityTable = state->getInMemTable(~entityConfig)
 
@@ -131,7 +142,7 @@ let prepareRollbackDiff = async (
       entityTable->InMemoryTable.Entity.set(
         ~committedCheckpointId,
         Set({
-          entityId: entity.id,
+          entityId: entity.id->EntityId.unsafeOfString,
           checkpointId: rollbackDiffCheckpointId,
           entity,
         }),
@@ -177,7 +188,7 @@ let setBatchDcs = (state: IndexerState.t, ~batch: Batch.t) => {
           inMemTable->InMemoryTable.Entity.set(
             ~committedCheckpointId,
             Set({
-              entityId: entity.id,
+              entityId: entity.id->EntityId.unsafeOfString,
               checkpointId,
               entity: entity->InternalTable.EnvioAddresses.castToInternal,
             }),

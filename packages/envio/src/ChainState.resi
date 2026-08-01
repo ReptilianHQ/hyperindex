@@ -9,7 +9,7 @@ let make: (
   ~chainConfig: Config.chain,
   ~fetchState: FetchState.t,
   ~onEventRegistrations: array<Internal.onEventRegistration>=?,
-  ~indexingAddresses: IndexingAddresses.t,
+  ~addressStore: AddressStore.t,
   ~sourceManager: SourceManager.t,
   ~reorgDetection: ReorgDetection.t,
   ~committedProgressBlockNumber: int,
@@ -98,15 +98,12 @@ let isReadyToEnterReorgThresholdAfterBatch: (t, ~batch: Batch.t) => bool
 
 // Derived (pure).
 let hasProcessedToEndblock: t => bool
+let isDurablyCaughtUp: t => bool
 let getHighestBlockBelowThreshold: t => int
 let isActivelyIndexing: t => bool
 let isReady: t => bool
 let isFetchingAtHead: t => bool
 let isAtHeadWithoutEndBlock: t => bool
-
-// Drop over-fetched events an address-param filter rejects, before contract
-// registration runs on them. Uses the chain's current indexing addresses.
-let filterByClientAddress: (t, array<Internal.item>) => array<Internal.item>
 
 // State transitions. The chain state is mutated only through these.
 let handleQueryResult: (
@@ -136,12 +133,13 @@ let registerReorgGuard: (
   ~knownHeight: int,
 ) => ReorgDetection.reorgResult
 let prepareReorg: (t, ~eventsProcessedDiff: option<float>) => unit
+let resetPendingQueries: t => unit
 let updateKnownHeight: (t, ~knownHeight: int) => unit
 let setEndBlockToFirstEvent: (t, ~blockNumber: int) => unit
 let enterReorgThreshold: t => unit
 let advanceAfterBatch: (t, ~batch: Batch.t, ~enteringReorgThreshold: bool) => unit
 let applyBatchProgress: (t, ~batch: Batch.t, ~blockTimestampName: string) => unit
-let markReady: t => unit
+let markReady: (t, ~readyAt: Date.t) => unit
 let rollback: (
   t,
   ~newProgressBlockNumber: option<int>,

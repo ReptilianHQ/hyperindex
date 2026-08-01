@@ -22,7 +22,7 @@ type t<'processConfig> = {process: 'processConfig => promise<processResult>}
 
 type entityChange = {
   sets: array<unknown>,
-  deleted: array<string>,
+  deleted: array<EntityId.t>,
 }
 
 type testIndexerState = {
@@ -55,7 +55,7 @@ let getIndexingAddressesByChain = (state: testIndexerState): dict<
     ->Dict.valuesToArray
     ->Array.forEach(entity => {
       let dc = entity->castToEnvioAddresses
-      let chainIdStr = dc.chainId->Int.toString
+      let chainIdStr = dc.chainId->ChainId.toString
       let contracts = switch byChain->Dict.get(chainIdStr) {
       | Some(arr) => arr
       | None =>
@@ -96,7 +96,7 @@ let handleWriteBatch = (
   state: testIndexerState,
   ~updatedEntities: array<Persistence.updatedEntity>,
   ~checkpointIds: array<bigint>,
-  ~checkpointChainIds: array<int>,
+  ~checkpointChainIds: array<ChainId.t>,
   ~checkpointBlockNumbers: array<int>,
   ~checkpointEventsProcessed: array<int>,
 ): unit => {
@@ -136,11 +136,12 @@ let handleWriteBatch = (
       switch change {
       | Set({entityId, entity, checkpointId}) =>
         // The store keeps decoded entities so load comparisons (bigint /
-        // BigDecimal) work on real values.
-        entityDict->Dict.set(entityId, entity)
+        // BigDecimal) work on real values. Ids are keyed by their string form
+        // since they may be string/int/bigint.
+        entityDict->Dict.set(entityId->EntityId.toKey, entity)
         entityChangeFor(checkpointId).sets->Array.push(entity->Utils.magic)->ignore
       | Delete({entityId, checkpointId}) =>
-        Dict.delete(entityDict->Obj.magic, entityId)
+        Dict.delete(entityDict->Obj.magic, entityId->EntityId.toKey)
         entityChangeFor(checkpointId).deleted->Array.push(entityId)->ignore
       }
     }
@@ -157,7 +158,7 @@ let handleWriteBatch = (
 
     // Update progress tracking from checkpoint data
     state.progressBlockByChain->Dict.set(
-      checkpointChainIds->Array.getUnsafe(i)->Int.toString,
+      checkpointChainIds->Array.getUnsafe(i)->ChainId.toString,
       checkpointBlockNumbers->Array.getUnsafe(i),
     )
 
@@ -197,7 +198,7 @@ let handleWriteBatch = (
             entityObj->Dict.set("sets", sets->(Utils.magic: array<unknown> => unknown))
           }
           if deleted->Array.length > 0 {
-            entityObj->Dict.set("deleted", deleted->(Utils.magic: array<string> => unknown))
+            entityObj->Dict.set("deleted", deleted->(Utils.magic: array<EntityId.t> => unknown))
           }
           // Match the capitalized entity accessor the generated change types expose.
           change->Dict.set(
@@ -222,8 +223,7 @@ let makeInitialState = (
 ): Persistence.initialState => {
   let chainKeys = processConfigChains->Dict.keysToArray
   let chains = chainKeys->Array.map(chainIdStr => {
-    let chainId = chainIdStr->Int.fromString->Option.getOr(0)
-    let chain = ChainMap.Chain.makeUnsafe(~chainId)
+    let chain = chainIdStr->ChainId.normalizeOrThrow
 
     if !(config.chainMap->ChainMap.has(chain)) {
       JsError.throwWithMessage(`Chain ${chainIdStr} is not configured in config.yaml`)
@@ -232,7 +232,7 @@ let makeInitialState = (
     let processChainConfig = processConfigChains->Dict.getUnsafe(chainIdStr)
     let indexingAddresses = indexingAddressesByChain->Dict.get(chainIdStr)->Option.getOr([])
     {
-      Persistence.id: chainId,
+      Persistence.id: chain,
       startBlock: processChainConfig.startBlock,
       endBlock: processChainConfig.endBlock,
       sourceBlockNumber: processChainConfig.endBlock->Option.getOr(0),
@@ -309,12 +309,9 @@ let parseBlockRange = (
   ~rawChainConfig: rawChainConfig,
   ~progressBlock: option<int>,
 ): chainConfig => {
-  let chainId = switch chainIdStr->Int.fromString {
-  | Some(id) => id
-  | None =>
-    JsError.throwWithMessage(`Invalid chain ID "${chainIdStr}": expected a numeric chain ID`)
+  let chain = try chainIdStr->ChainId.normalizeOrThrow catch {
+  | _ => JsError.throwWithMessage(`Invalid chain ID "${chainIdStr}": expected a numeric chain ID`)
   }
-  let chain = ChainMap.Chain.makeUnsafe(~chainId)
   if !(config.chainMap->ChainMap.has(chain)) {
     JsError.throwWithMessage(`Chain ${chainIdStr} is not configured in config.yaml`)
   }
@@ -484,6 +481,10 @@ let makeInMemoryStorage = (~state: testIndexerState): Persistence.storage => {
     state
     ->handleLoad(~tableName=table.tableName, ~filter)
     ->(Utils.magic: array<Internal.entity> => array<unknown>),
+  // The in-memory storage has no indexes to build, and it's always ready.
+  ensureQueryIndexes: async (~table as _, ~filters as _) => (),
+  ensureSchemaIndexes: async (~entities as _) => (),
+  finalizeBackfill: async (~entities as _, ~chainIds as _, ~readyAt as _) => (),
   writeBatch: async (
     ~batch,
     ~rollback as _,
@@ -637,7 +638,7 @@ let createTestIndexer = (): t<'processConfig> => {
   config.chainMap
   ->ChainMap.values
   ->Array.forEach(chainConfig => {
-    let chainIdStr = chainConfig.id->Int.toString
+    let chainIdStr = chainConfig.id->ChainId.toString
     chainIds->Array.push(chainConfig.id)->ignore
 
     let chainObj = Utils.Object.createNullObject()
@@ -672,7 +673,7 @@ let createTestIndexer = (): t<'processConfig> => {
               )
             }
             getIndexingAddressesByChain(state)
-            ->Dict.get(chainConfig.id->Int.toString)
+            ->Dict.get(chainConfig.id->ChainId.toString)
             ->Option.getOr([])
             ->Array.filterMap(ia => ia.contractName === contract.name ? Some(ia.address) : None)
           },
@@ -698,7 +699,7 @@ let createTestIndexer = (): t<'processConfig> => {
 
   // Build the result object with process + entity operations + chain info
   let result: dict<unknown> = Dict.make()
-  result->Dict.set("chainIds", chainIds->(Utils.magic: array<int> => unknown))
+  result->Dict.set("chainIds", chainIds->(Utils.magic: array<ChainId.t> => unknown))
   result->Dict.set("chains", chains->(Utils.magic: {..} => unknown))
   entityOpsDict
   ->Dict.toArray

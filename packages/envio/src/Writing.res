@@ -8,6 +8,14 @@
 // processing must wait for the cycle to free capacity.
 let keepLatestChangesLimit = Env.inMemoryObjectsTarget
 
+let pipelineSnapshot = (state: IndexerState.t): RuntimeHooks.pipelineSnapshot => {
+  let batches = state->IndexerState.processedBatches
+  {
+    queueBatches: batches->Array.length,
+    queueItems: batches->Array.reduce(0, (total, batch) => total + batch.totalBatchSize),
+  }
+}
+
 let getChangesCount = (state: IndexerState.t) => {
   let total = ref(0.)
   state
@@ -105,6 +113,7 @@ let runOneWrite = async (state: IndexerState.t) => {
   | _ =>
     let committedCheckpointId = state->IndexerState.committedCheckpointId
     let batch = state->IndexerState.drainBatchRun
+    RuntimeHooks.recordPipeline("write_start", state->pipelineSnapshot)
     // The run's last checkpoint; entity changes above it stay queued for the next write.
     let upToCheckpointId = switch batch.checkpointIds->Utils.Array.last {
     | Some(checkpointId) => checkpointId
@@ -142,17 +151,19 @@ let runOneWrite = async (state: IndexerState.t) => {
     // breaks a later rollback). Rollback writes touch every history table, so
     // they get no concurrent prune at all.
     let _ = await Promise.all2((
-      persistence.storage.writeBatch(
-        ~batch,
-        ~rollback,
-        ~isInReorgThreshold=batch.isInReorgThreshold,
-        ~config,
-        ~allEntities=persistence.allEntities,
-        ~updatedEntities,
-        ~updatedEffectsCache,
-        ~chainMetaData,
-        ~onWrite=(~storage, ~timeSeconds) =>
-          state->IndexerState.recordStorageWrite(~storage, ~timeSeconds),
+      RuntimeHooks.tracePhase("storage_write", () =>
+        persistence.storage.writeBatch(
+          ~batch,
+          ~rollback,
+          ~isInReorgThreshold=batch.isInReorgThreshold,
+          ~config,
+          ~allEntities=persistence.allEntities,
+          ~updatedEntities,
+          ~updatedEffectsCache,
+          ~chainMetaData,
+          ~onWrite=(~storage, ~timeSeconds) =>
+            state->IndexerState.recordStorageWrite(~storage, ~timeSeconds),
+        )
       ),
       PruneStaleHistory.runConcurrent(state, ~targets=pruneTargets),
     ))
@@ -168,6 +179,7 @@ let runOneWrite = async (state: IndexerState.t) => {
     // Entities starved of the concurrent prune (eg written in every batch) are
     // pruned here with no other pg writer running.
     await PruneStaleHistory.runForced(state, ~targets=pruneTargets)
+    RuntimeHooks.recordPipeline("write_complete", state->pipelineSnapshot)
   }
 }
 
@@ -180,7 +192,9 @@ let runWriteLoop = async (state: IndexerState.t) => {
       await runOneWrite(state)
       state->IndexerState.wakeCommitWaiters
     } catch {
-    | exn => state->IndexerState.recordWriteFailure(exn)
+    | exn =>
+      RuntimeHooks.recordPipeline("write_error", state->pipelineSnapshot)
+      state->IndexerState.recordWriteFailure(exn)
     }
   }
   state->IndexerState.endWriteFiber
@@ -214,6 +228,7 @@ let setChainMeta = (state: IndexerState.t, chainsData: dict<InternalTable.Chains
 // happens off the processing path.
 let commitBatch = (state: IndexerState.t, ~batch: Batch.t) => {
   state->IndexerState.queueProcessedBatch(~batch)
+  RuntimeHooks.recordPipeline("queued", state->pipelineSnapshot)
   state->schedule
 }
 
@@ -237,7 +252,7 @@ let dropCommitted = (state: IndexerState.t, ~keepLoadedFromDb) => {
 
 // Blocks until the store holds fewer than keepLatestChangesLimit changes,
 // freeing committed changes first and awaiting commits as a last resort.
-let rec awaitCapacity = async (state: IndexerState.t) => {
+let rec awaitCapacityLoop = async (state: IndexerState.t) => {
   // After a failed write nothing will free capacity, so bail instead of waiting
   // on a commit that won't come (the error already went to onError).
   if !(state->IndexerState.hasFailedWrite) && state->getChangesCount >= keepLatestChangesLimit {
@@ -259,10 +274,20 @@ let rec awaitCapacity = async (state: IndexerState.t) => {
     ) {
       state->schedule
       await state->waitForCommit
-      await state->awaitCapacity
+      await state->awaitCapacityLoop
     }
   }
 }
+
+// Only the over-limit path is a real stall. Timing every call would charge each
+// batch the microtask hop of awaiting an already-resolved promise, which reads
+// as storage backpressure that isn't there.
+let awaitCapacity = async (state: IndexerState.t) =>
+  if state->getChangesCount >= keepLatestChangesLimit {
+    let timeRef = Performance.now()
+    await state->awaitCapacityLoop
+    state->IndexerState.recordStalledOnStorageWrite(~seconds=timeRef->Performance.secondsSince)
+  }
 
 // Awaits until everything processed is persisted. On a failed write we stop
 // draining (onError already surfaced it) rather than throw.

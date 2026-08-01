@@ -10,7 +10,7 @@ let defaultQuery: FetchState.query = {
   itemsTarget: Some(0),
   itemsEst: 0,
   selection: {FetchState.dependsOnAddresses: false, onEventRegistrations: []},
-  addressesByContractName: Dict.make(),
+  addresses: TestAddresses.setOf([]),
 }
 
 let populateChainQueuesWithRandomEvents = (~runTime=1000, ~maxBlockTime=15, ()) => {
@@ -40,17 +40,16 @@ let populateChainQueuesWithRandomEvents = (~runTime=1000, ~maxBlockTime=15, ()) 
       ) :> Internal.onEventRegistration),
     ]
     let addresses = []
-    let contractConfigs = IndexingAddresses.makeContractConfigs(~onEventRegistrations)
-    let indexingAddresses = IndexingAddresses.make(~contractConfigs, ~addresses)
+    let addressStore = TestAddresses.makeStore(~onEventRegistrations, ~addresses)
     let fetcherStateInit: FetchState.t = FetchState.make(
       ~maxAddrInPartition=Env.maxAddrInPartition,
       ~endBlock=None,
       ~onEventRegistrations,
-      ~contractConfigs,
+      ~addressStore,
       ~addresses,
       ~startBlock=0,
       ~maxOnBlockBufferSize=5000,
-      ~chainId=1,
+      ~chainId=1->ChainId.fromInt,
       ~knownHeight=0,
     )
 
@@ -73,7 +72,7 @@ let populateChainQueuesWithRandomEvents = (~runTime=1000, ~maxBlockTime=15, ()) 
 
       for logIndex in 0 to numberOfEventsInBatch {
         let batchItem = Internal.Event({
-          chain: ChainMap.Chain.makeUnsafe(~chainId=id),
+          chainId: id,
           blockNumber: currentBlockNumber.contents,
           logIndex,
           transactionIndex: 0,
@@ -82,7 +81,7 @@ let populateChainQueuesWithRandomEvents = (~runTime=1000, ~maxBlockTime=15, ()) 
           onEventRegistration: {"index": 0}->(
             Utils.magic: {"index": int} => Internal.onEventRegistration
           ),
-          payload: `mock event (chainId)${id->Int.toString} - (blockNumber)${currentBlockNumber.contents->Int.toString} - (logIndex)${logIndex->Int.toString} - (timestamp)${currentTime.contents->Int.toString}`->(
+          payload: `mock event (chainId)${id->ChainId.toString} - (blockNumber)${currentBlockNumber.contents->Int.toString} - (logIndex)${logIndex->Int.toString} - (timestamp)${currentTime.contents->Int.toString}`->(
             Utils.magic: string => Internal.eventPayload
           ),
         })
@@ -99,7 +98,7 @@ let populateChainQueuesWithRandomEvents = (~runTime=1000, ~maxBlockTime=15, ()) 
             dependsOnAddresses: false,
             onEventRegistrations,
           },
-          addressesByContractName: Dict.make(),
+          addresses: TestAddresses.setOf([]),
         }
 
         fetchState.contents->FetchState.startFetchingQueries(~queries=[query])
@@ -124,11 +123,11 @@ let populateChainQueuesWithRandomEvents = (~runTime=1000, ~maxBlockTime=15, ()) 
     let chainConfig = config.defaultChain->Option.getUnsafe
     // For this test we don't need real sources - just testing event ordering
     // Create a mock source that satisfies SourceManager requirements (chain ID doesn't matter here)
-    let mockSource = MockIndexer.Source.make([], ~chain=#1)
+    let mockSource = MockIndexer.Source.make([], ~chainId=#1)
     let mockChainState = ChainState.make(
       ~chainConfig,
       ~fetchState=fetchState.contents,
-      ~indexingAddresses,
+      ~addressStore,
       ~sourceManager=SourceManager.make(~sources=[mockSource.source], ~isRealtime=false),
       // This is quite a hack - but it works!
       ~reorgDetection=ReorgDetection.make(
@@ -140,7 +139,7 @@ let populateChainQueuesWithRandomEvents = (~runTime=1000, ~maxBlockTime=15, ()) 
       ~logger=Logging.getLogger(),
     )
 
-    chainStates->Utils.Dict.setByInt(id, mockChainState)
+    chainStates->ChainId.Dict.set(id, mockChainState)
   })
 
   let state = IndexerState.make(
@@ -157,8 +156,8 @@ let populateChainQueuesWithRandomEvents = (~runTime=1000, ~maxBlockTime=15, ()) 
 
 let getItemKey = (item: Internal.item) =>
   switch item {
-  | Event({chain, blockNumber, logIndex}) => (
-      chain->ChainMap.Chain.toChainId,
+  | Event({chainId, blockNumber, logIndex}) => (
+      chainId,
       blockNumber,
       logIndex,
     )
@@ -183,7 +182,7 @@ describe("IndexerState", () => {
         let (state, numberOfMockEventsCreated, _allEvents) = populateChainQueuesWithRandomEvents()
 
         let defaultFirstEvent = Internal.Event({
-          chain: MockConfig.chain1,
+          chainId: MockConfig.chain1,
           blockNumber: 0,
           logIndex: 0,
           transactionIndex: 0,
@@ -259,14 +258,13 @@ describe("IndexerState", () => {
 
         let makeFetchState = (~chainId, ~eventBlocks) => {
           let addresses = []
-          let contractConfigs = IndexingAddresses.makeContractConfigs(~onEventRegistrations)
-          let indexingAddresses = IndexingAddresses.make(~contractConfigs, ~addresses)
+          let addressStore = TestAddresses.makeStore(~onEventRegistrations, ~addresses)
           let fetchState = ref(
             FetchState.make(
               ~maxAddrInPartition=Env.maxAddrInPartition,
               ~endBlock=None,
               ~onEventRegistrations,
-              ~contractConfigs,
+              ~addressStore,
               ~addresses,
               ~startBlock=0,
               ~maxOnBlockBufferSize=5000,
@@ -284,7 +282,7 @@ describe("IndexerState", () => {
                 toBlock: None,
                 isChunk: false,
                 selection: {dependsOnAddresses: false, onEventRegistrations},
-                addressesByContractName: Dict.make(),
+                addresses: TestAddresses.setOf([]),
               }
               fetchState.contents->FetchState.startFetchingQueries(~queries=[query])
               fetchState :=
@@ -293,7 +291,7 @@ describe("IndexerState", () => {
                   ~latestFetchedBlock={blockNumber, blockTimestamp: blockNumber * 15},
                   ~newItems=[
                     Internal.Event({
-                      chain: ChainMap.Chain.makeUnsafe(~chainId),
+                      chainId: chainId,
                       blockNumber,
                       logIndex: 0,
                       transactionIndex: 0,
@@ -307,7 +305,7 @@ describe("IndexerState", () => {
                 )
             },
           )
-          (fetchState.contents, indexingAddresses)
+          (fetchState.contents, addressStore)
         }
 
         let makeState = (~eventBlocks): IndexerState.t => {
@@ -316,12 +314,12 @@ describe("IndexerState", () => {
           ->ChainMap.values
           ->Array.forEach(
             chainConfig => {
-              let mockSource = MockIndexer.Source.make([], ~chain=#1)
-              let (fetchState, indexingAddresses) = makeFetchState(~chainId=chainConfig.id, ~eventBlocks)
+              let mockSource = MockIndexer.Source.make([], ~chainId=#1)
+              let (fetchState, addressStore) = makeFetchState(~chainId=chainConfig.id, ~eventBlocks)
               let chainState = ChainState.make(
                 ~chainConfig,
                 ~fetchState,
-                ~indexingAddresses,
+                ~addressStore,
                 ~sourceManager=SourceManager.make(~sources=[mockSource.source], ~isRealtime=false),
                 ~reorgDetection=ReorgDetection.make(
                   ~chainReorgCheckpoints=[],
@@ -331,7 +329,7 @@ describe("IndexerState", () => {
                 ~committedProgressBlockNumber=-1,
                 ~logger=Logging.getLogger(),
               )
-              chainStates->Utils.Dict.setByInt(chainConfig.id, chainState)
+              chainStates->ChainId.Dict.set(chainConfig.id, chainState)
             },
           )
           IndexerState.make(
@@ -353,12 +351,11 @@ describe("IndexerState", () => {
             ~isRollback=false,
           )
 
-        let chain = config.chainMap->ChainMap.keys->Array.getUnsafe(0)
-        let chainId = chain->ChainMap.Chain.toChainId
+        let chainId = config.chainMap->ChainMap.keys->Array.getUnsafe(0)
 
         // A fetch lands mid-batch and appends block 15 to this chain's buffer
         // (its batch-time snapshot held only block 5).
-        let cs = state->IndexerState.getChainState(~chain)
+        let cs = state->IndexerState.getChainState(~chainId)
         let concurrentQuery: FetchState.query = {
           partitionId: "0",
           itemsTarget: Some(0),
@@ -367,7 +364,7 @@ describe("IndexerState", () => {
           toBlock: None,
           isChunk: false,
           selection: {dependsOnAddresses: false, onEventRegistrations},
-          addressesByContractName: Dict.make(),
+          addresses: TestAddresses.setOf([]),
         }
         cs->ChainState.startFetchingQueries(~queries=[concurrentQuery])
         cs->ChainState.handleQueryResult(
@@ -376,7 +373,7 @@ describe("IndexerState", () => {
           ~latestFetchedBlock={blockNumber: 15, blockTimestamp: 15 * 15},
           ~newItems=[
             Internal.Event({
-              chain,
+              chainId,
               blockNumber: 15,
               logIndex: 0,
               transactionIndex: 0,
@@ -393,10 +390,10 @@ describe("IndexerState", () => {
         )
 
         state->IndexerState.applyBatchProgress(~batch)
-        let resultCs = state->IndexerState.getChainState(~chain)
+        let resultCs = state->IndexerState.getChainState(~chainId)
         let progressed =
           batch.progressedChainsById
-          ->Utils.Dict.dangerouslyGetByIntNonOption(chainId)
+          ->ChainId.Dict.dangerouslyGetNonOption(chainId)
           ->Option.getUnsafe
 
         t.expect(

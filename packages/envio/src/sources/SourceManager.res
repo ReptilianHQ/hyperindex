@@ -1,5 +1,10 @@
 type sourceManagerStatus = Idle | WaitingForNewBlock | Querying
 
+let safelyRecord = callback =>
+  try callback() catch {
+  | _ => ()
+  }
+
 // Cumulative per-method request count/time for a source, aggregated from the
 // requestStat arrays returned by its methods. Rendered into
 // envio_source_request_* by Metrics.renderSourceRequests.
@@ -32,7 +37,7 @@ let recordRequestStats = (sourceState: sourceState, requestStats: array<Source.r
 // inline into the /metrics response.
 type requestStatSample = {
   sourceName: string,
-  chainId: int,
+  chainId: ChainId.t,
   method: string,
   count: int,
   seconds: float,
@@ -81,7 +86,7 @@ let getActiveSource = sourceManager => sourceManager.activeSource
 let getRequestStatSamples = (sourceManager: t): array<requestStatSample> => {
   let samples = []
   sourceManager.sourcesState->Array.forEach(sourceState => {
-    let chainId = sourceState.source.chain->ChainMap.Chain.toChainId
+    let chainId = sourceState.source.chainId
     sourceState.requestStats->Utils.Dict.forEachWithKey((agg, method) => {
       samples
       ->Array.push({
@@ -101,7 +106,7 @@ let getRequestStatSamples = (sourceManager: t): array<requestStatSample> => {
 // observed height yet are skipped.
 type sourceHeightSample = {
   sourceName: string,
-  chainId: int,
+  chainId: ChainId.t,
   height: int,
 }
 
@@ -111,7 +116,7 @@ let getSourceHeightSamples = (sourceManager: t): array<sourceHeightSample> => {
     if sourceState.knownHeight > 0 {
       samples->Array.push({
         sourceName: sourceState.source.name,
-        chainId: sourceState.source.chain->ChainMap.Chain.toChainId,
+        chainId: sourceState.source.chainId,
         height: sourceState.knownHeight,
       })
     }
@@ -197,6 +202,7 @@ let stopRateLimitTimeout = sourceManager => {
 // silent under chronic throttling.
 let waitForRateLimitReset = async (sourceManager: t, ~resetMs, ~retry, ~logger) => {
   let waitMs = Pervasives.min(resetMs, 300_000)
+  safelyRecord(() => RuntimeHooks.recordSourceRateLimit(retry, waitMs))
   let log = retry >= 2 ? Logging.childWarn : Logging.childTrace
   logger->log({
     "msg": `HyperSync source is rate-limited — not critical, the indexer will retry in ${(waitMs / 1000)
@@ -425,7 +431,7 @@ let getSourceNewHeight = async (
         logger->Logging.childTrace({
           "msg": "onHeight subscription stale, switching to polling fallback",
           "source": source.name,
-          "chainId": source.chain->ChainMap.Chain.toChainId,
+          "chainId": source.chainId,
         })
         let h = ref(initialHeight)
         while h.contents <= knownHeight && !(newHeight.contents > initialHeight) {
@@ -585,7 +591,7 @@ let waitForNewBlock = async (sourceManager: t, ~knownHeight, ~isRealtime, ~reduc
 
   let logger = Logging.createChild(
     ~params={
-      "chainId": sourceManager.activeSource.chain->ChainMap.Chain.toChainId,
+      "chainId": sourceManager.activeSource.chainId,
       "knownHeight": knownHeight,
     },
   )
@@ -724,9 +730,7 @@ let executeQuery = async (
     ) {
     | Some(s) =>
       if s.source !== sourceManager.activeSource {
-        let logger = Logging.createChild(
-          ~params={"chainId": sourceManager.activeSource.chain->ChainMap.Chain.toChainId},
-        )
+        let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
         logger->Logging.childInfo({
           "msg": "Switching data-source",
           "source": s.source.name,
@@ -736,9 +740,7 @@ let executeQuery = async (
       }
       s
     | None =>
-      let logger = Logging.createChild(
-        ~params={"chainId": sourceManager.activeSource.chain->ChainMap.Chain.toChainId},
-      )
+      let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
       %raw(`null`)->ErrorHandling.mkLogAndRaise(~logger, ~msg=noSourcesError)
     }
     sourceManager.activeSource = sourceState.source
@@ -748,30 +750,54 @@ let executeQuery = async (
 
     let logger = Logging.createChild(
       ~params={
-        "chainId": source.chain->ChainMap.Chain.toChainId,
+        "chainId": source.chainId,
         "logType": "Block Range Query",
         "partitionId": query.partitionId,
         "source": source.name,
         "fromBlock": query.fromBlock,
         "toBlock": toBlock,
-        "addresses": query.addressesByContractName->FetchState.addressesByContractNameCount,
+        "addresses": query.addresses->AddressSet.size,
         "retry": retry,
       },
     )
 
     try {
-      let response = await source.getItemsOrThrow(
+      switch (source.poweredByHyperSync, toBlock) {
+      | (true, Some(requestedToBlock)) =>
+        let reason = switch query.toBlock {
+        | Some(plannedToBlock) if plannedToBlock === requestedToBlock => query.rangeReason
+        | _ => "provider_retry"
+        }
+        safelyRecord(() =>
+          RuntimeHooks.recordSourceRange(reason, requestedToBlock - query.fromBlock + 1)
+        )
+      | _ => ()
+      }
+      safelyRecord(() => RuntimeHooks.recordSourceRequest("start", query.partitionId))
+      let request = source.getItemsOrThrow(
         ~fromBlock=query.fromBlock,
         ~toBlock,
-        ~addressesByContractName=query.addressesByContractName,
-        ~contractNameByAddress=query.addressesByContractName->FetchState.deriveContractNameByAddress,
+        ~addressSet=query.addresses,
         ~partitionId=query.partitionId,
         ~knownHeight,
-        ~selection=query.selection,
+        ~selection=query.selection->FetchState.narrowSelectionToRange(~toBlock),
         ~itemsTarget=query.itemsTarget,
         ~retry,
         ~logger,
       )
+      let response = await request->Promise.finally(() =>
+        safelyRecord(() => RuntimeHooks.recordSourceRequest("finish", query.partitionId))
+      )
+      switch (source.poweredByHyperSync, toBlock) {
+      | (true, Some(requestedToBlock)) =>
+        safelyRecord(() =>
+          RuntimeHooks.recordSourcePage(
+            requestedToBlock - query.fromBlock + 1,
+            response.latestFetchedBlockNumber - query.fromBlock + 1,
+          )
+        )
+      | _ => ()
+      }
       sourceState->recordRequestStats(response.requestStats)
       sourceState.lastFailedAt = None
 
@@ -896,9 +922,7 @@ let getBlockHashes = async (sourceManager: t, ~blockNumbers: array<int>, ~isReal
     let sourceState = switch sourceManager->getNextSource(~isRealtime) {
     | Some(s) => s
     | None =>
-      let logger = Logging.createChild(
-        ~params={"chainId": sourceManager.activeSource.chain->ChainMap.Chain.toChainId},
-      )
+      let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
       %raw(`null`)->ErrorHandling.mkLogAndRaise(
         ~logger,
         ~msg="No data-sources available for fetching block hashes.",
@@ -910,7 +934,7 @@ let getBlockHashes = async (sourceManager: t, ~blockNumbers: array<int>, ~isReal
 
     let logger = Logging.createChild(
       ~params={
-        "chainId": source.chain->ChainMap.Chain.toChainId,
+        "chainId": source.chainId,
         "logType": "Block Hash Query",
         "source": source.name,
         "retry": retry,

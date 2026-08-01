@@ -1,13 +1,12 @@
 // The indexer state. `t` is opaque: other modules read it through the accessors
 // and change it only through the transitions and setters exposed here.
 
-type chain = ChainMap.Chain.t
 
 type rollbackState =
   | NoRollback
-  | ReorgDetected({chain: chain, blockNumber: int})
+  | ReorgDetected({chainId: ChainId.t, blockNumber: int})
   | FindingReorgDepth
-  | FoundReorgDepth({chain: chain, rollbackTargetBlockNumber: int})
+  | FoundReorgDepth({chainId: ChainId.t, rollbackTargetBlockNumber: int})
   | RollbackReady({eventsProcessedDiffByChain: dict<float>})
 
 module EntityTables: {
@@ -54,11 +53,11 @@ let isStale: (t, ~stateId: int) => bool
 let isResolvingReorg: t => bool
 let errorExit: (t, ErrorHandling.t) => unit
 let stop: t => unit
-let getChainState: (t, ~chain: chain) => ChainState.t
+let getChainState: (t, ~chainId: ChainId.t) => ChainState.t
 let enterReorgThreshold: t => unit
-let beginReorg: (t, ~chain: chain, ~blockNumber: int) => unit
+let beginReorg: (t, ~chainId: ChainId.t, ~blockNumber: int) => unit
 let enterFindingReorgDepth: t => unit
-let foundReorgDepth: (t, ~chain: chain, ~rollbackTargetBlockNumber: int) => unit
+let foundReorgDepth: (t, ~chainId: ChainId.t, ~rollbackTargetBlockNumber: int) => unit
 let completeRollback: (t, ~eventsProcessedDiffByChain: dict<float>) => unit
 let clearRollback: t => unit
 let invalidateInflight: t => unit
@@ -66,6 +65,7 @@ let applyBatchProgress: (t, ~batch: Batch.t) => unit
 let isProcessing: t => bool
 let beginProcessing: t => unit
 let endProcessing: t => unit
+let markProcessingStalledOnFetch: t => unit
 let recordProcessedBatch: t => unit
 let createBatch: (
   t,
@@ -86,6 +86,7 @@ let processedCheckpointId: t => Internal.checkpointId
 let processedBatches: t => array<Batch.t>
 let processedBatchesCount: t => int
 let writeFiber: t => option<promise<unit>>
+let finalizeFiber: t => option<promise<unit>>
 let hasFailedWrite: t => bool
 let chainMetaDirty: t => bool
 let chainMetaThrottler: t => Throttler.t
@@ -93,6 +94,9 @@ let crossChainState: t => CrossChainState.t
 let chainStates: t => dict<ChainState.t>
 let isInReorgThreshold: t => bool
 let isRealtime: t => bool
+let isFinalizingIndexes: t => bool
+let markCaughtUpIfSettled: t => unit
+let markReady: (t, ~readyAt: Date.t) => unit
 let rollbackState: t => rollbackState
 let indexerStartTime: t => Date.t
 let loadManager: t => LoadManager.t
@@ -110,6 +114,7 @@ let toMetrics: t => Metrics.t
 
 // Metric counters.
 let recordBatchDurations: (t, ~loadDuration: float, ~handlerDuration: float) => unit
+let recordStalledOnStorageWrite: (t, ~seconds: float) => unit
 let recordHandlerDuration: (t, ~contract: string, ~event: string, ~duration: float) => unit
 let startPreloadHandler: (t, ~contract: string, ~event: string) => Performance.timeRef
 let endPreloadHandler: (t, Performance.timeRef, ~contract: string, ~event: string) => unit
@@ -140,6 +145,8 @@ let beginRollbackDiff: (
 let recordWriteFailure: (t, exn) => unit
 let beginWriteFiber: (t, promise<unit>) => unit
 let endWriteFiber: t => unit
+let beginFinalizeFiber: (t, promise<unit>) => unit
+let endFinalizeFiber: t => unit
 let wakeCommitWaiters: t => unit
 let addCommitWaiter: (t, unit => unit) => unit
 let stageChainMeta: (t, dict<InternalTable.Chains.metaFields>) => unit

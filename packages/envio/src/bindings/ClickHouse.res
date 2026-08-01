@@ -44,9 +44,15 @@ let getClickHouseFieldType = (
   ~fieldType: Table.fieldType,
   ~isNullable: bool,
   ~isArray: bool,
+  ~chainIdMode: ChainId.mode=Int32,
 ): string => {
   let baseType = switch fieldType {
   | Int32 => "Int32"
+  | ChainId =>
+    switch chainIdMode {
+    | Int32 => "Int32"
+    | Int64 => "UInt64"
+    }
   | Uint32 => "UInt32"
   | UInt52 => "UInt64"
   | UInt64 => "UInt64"
@@ -91,7 +97,6 @@ let getClickHouseFieldType = (
         ->Array.joinUnsafe(", ")
       `${enumType}(${enumValues})`
     }
-  | Entity(_) => "String"
   }
 
   let baseType = if isArray {
@@ -124,6 +129,7 @@ let makeClickHouseEntitySchema = (table: Table.table): S.t<Internal.entity> => {
                 dateSchema
               }
             }
+          | ChainId => ChainId.schema->S.toUnknown
           // ClickHouse returns UInt64 values as strings, need to parse to float
           | UInt52 => {
               let uint52Schema =
@@ -261,11 +267,14 @@ let setUpdatesOrThrow = async (
         convertOrThrow: S.compile(
           S.array(
             S.union([
-              EntityHistory.makeSetUpdateSchema(makeClickHouseEntitySchema(entityConfig.table)),
+              EntityHistory.makeSetUpdateSchema(
+                ~idSchema=entityConfig.table->Table.getIdSchema,
+                makeClickHouseEntitySchema(entityConfig.table),
+              ),
               S.object(s => {
                 s.tag(EntityHistory.changeFieldName, EntityHistory.RowAction.DELETE)
                 Change.Delete({
-                  entityId: s.field(Table.idFieldName, S.string),
+                  entityId: s.field(Table.idFieldName, entityConfig.table->Table.getIdSchema),
                   checkpointId: s.field(
                     EntityHistory.checkpointIdFieldName,
                     EntityHistory.unsafeCheckpointIdSchema,
@@ -335,6 +344,7 @@ let makeCreateHistoryTableQuery = (
   ~database: string,
   ~replicated: bool=false,
   ~onCluster: bool=false,
+  ~chainIdMode: ChainId.mode=Int32,
 ) => {
   let tableEngine = replicated ? "ReplicatedMergeTree" : "MergeTree()"
   let fieldDefinitions = entityConfig.table.fields->Array.filterMap(field => {
@@ -346,6 +356,7 @@ let makeCreateHistoryTableQuery = (
           ~fieldType=field.fieldType,
           ~isNullable=field.isNullable,
           ~isArray=field.isArray,
+          ~chainIdMode,
         )
         `\`${fieldName}\` ${clickHouseType}`
       })
@@ -444,6 +455,7 @@ let makeCreateCheckpointsTableQuery = (
   ~database: string,
   ~replicated: bool=false,
   ~onCluster: bool=false,
+  ~chainIdMode: ChainId.mode=Int32,
 ) => {
   let tableEngine = replicated ? "ReplicatedMergeTree" : "MergeTree()"
   let idField = (#id: InternalTable.Checkpoints.field :> string)
@@ -457,9 +469,10 @@ let makeCreateCheckpointsTableQuery = (
     )} (
   \`${idField}\` ${getClickHouseFieldType(~fieldType=UInt64, ~isNullable=false, ~isArray=false)},
   \`${chainIdField}\` ${getClickHouseFieldType(
-      ~fieldType=Int32,
+      ~fieldType=ChainId,
       ~isNullable=false,
       ~isArray=false,
+      ~chainIdMode,
     )},
   \`${blockNumberField}\` ${getClickHouseFieldType(
       ~fieldType=Int32,
@@ -526,6 +539,7 @@ let initialize = async (
   ~database: string,
   ~entities: array<Internal.entityConfig>,
   ~enums as _: array<Table.enumConfig<Table.enum>>,
+  ~chainIdMode: ChainId.mode=Int32,
 ) => {
   try {
     let databaseEngine = Env.ClickHouse.databaseEngine()
@@ -598,12 +612,18 @@ let initialize = async (
             ~database,
             ~replicated,
             ~onCluster=ddlOnCluster,
+            ~chainIdMode,
           ),
         })
       ),
     )->Utils.Promise.ignoreValue
     await client->exec({
-      query: makeCreateCheckpointsTableQuery(~database, ~replicated, ~onCluster=ddlOnCluster),
+      query: makeCreateCheckpointsTableQuery(
+        ~database,
+        ~replicated,
+        ~onCluster=ddlOnCluster,
+        ~chainIdMode,
+      ),
     })
 
     // The client pools HTTP connections, so consecutive statements may reach
