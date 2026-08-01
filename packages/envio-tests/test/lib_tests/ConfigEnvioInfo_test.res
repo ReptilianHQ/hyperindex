@@ -84,6 +84,18 @@ describe("Config.stripSensitiveData", () => {
 })
 
 describe("Config.diffPaths", () => {
+  it("allows a version-only upgrade when the data contract is unchanged", t => {
+    let stored = json(`{"version": "3.5.0-alpha.1", "name": "demo", "entities": []}`)
+    let current = json(`{"version": "3.5.0", "name": "demo", "entities": []}`)
+    t.expect(Config.diffPaths(~stored, ~current), ~message="version-only upgrade").toEqual([])
+  })
+
+  it("still reports structural changes across a version upgrade", t => {
+    let stored = json(`{"version": "3.5.0-alpha.1", "name": "old", "entities": []}`)
+    let current = json(`{"version": "3.5.0", "name": "new", "entities": []}`)
+    t.expect(Config.diffPaths(~stored, ~current), ~message="structural change").toEqual(["name"])
+  })
+
   it("returns [] for structurally equal JSON regardless of key order", t => {
     let stored = json(`{"a": {"x": 1, "y": 2}, "b": [1, 2, 3]}`)
     let current = json(`{"b": [1, 2, 3], "a": {"y": 2, "x": 1}}`)
