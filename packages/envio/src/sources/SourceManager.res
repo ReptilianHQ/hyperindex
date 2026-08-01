@@ -1,5 +1,10 @@
 type sourceManagerStatus = Idle | WaitingForNewBlock | Querying
 
+let safelyRecord = callback =>
+  try callback() catch {
+  | _ => ()
+  }
+
 // Cumulative per-method request count/time for a source, aggregated from the
 // requestStat arrays returned by its methods. Rendered into
 // envio_source_request_* by Metrics.renderSourceRequests.
@@ -197,6 +202,7 @@ let stopRateLimitTimeout = sourceManager => {
 // silent under chronic throttling.
 let waitForRateLimitReset = async (sourceManager: t, ~resetMs, ~retry, ~logger) => {
   let waitMs = Pervasives.min(resetMs, 300_000)
+  safelyRecord(() => RuntimeHooks.recordSourceRateLimit(retry, waitMs))
   let log = retry >= 2 ? Logging.childWarn : Logging.childTrace
   logger->log({
     "msg": `HyperSync source is rate-limited — not critical, the indexer will retry in ${(waitMs / 1000)
@@ -756,7 +762,19 @@ let executeQuery = async (
     )
 
     try {
-      let response = await source.getItemsOrThrow(
+      switch (source.poweredByHyperSync, toBlock) {
+      | (true, Some(requestedToBlock)) =>
+        let reason = switch query.toBlock {
+        | Some(plannedToBlock) if plannedToBlock === requestedToBlock => query.rangeReason
+        | _ => "provider_retry"
+        }
+        safelyRecord(() =>
+          RuntimeHooks.recordSourceRange(reason, requestedToBlock - query.fromBlock + 1)
+        )
+      | _ => ()
+      }
+      safelyRecord(() => RuntimeHooks.recordSourceRequest("start", query.partitionId))
+      let request = source.getItemsOrThrow(
         ~fromBlock=query.fromBlock,
         ~toBlock,
         ~addressSet=query.addresses,
@@ -767,6 +785,19 @@ let executeQuery = async (
         ~retry,
         ~logger,
       )
+      let response = await request->Promise.finally(() =>
+        safelyRecord(() => RuntimeHooks.recordSourceRequest("finish", query.partitionId))
+      )
+      switch (source.poweredByHyperSync, toBlock) {
+      | (true, Some(requestedToBlock)) =>
+        safelyRecord(() =>
+          RuntimeHooks.recordSourcePage(
+            requestedToBlock - query.fromBlock + 1,
+            response.latestFetchedBlockNumber - query.fromBlock + 1,
+          )
+        )
+      | _ => ()
+      }
       sourceState->recordRequestStats(response.requestStats)
       sourceState.lastFailedAt = None
 

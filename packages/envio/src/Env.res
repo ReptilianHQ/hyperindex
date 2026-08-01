@@ -6,9 +6,16 @@
 let targetBufferSize = envSafe->EnvSafe.get("ENVIO_INDEXING_MAX_BUFFER_SIZE", S.option(S.int))
 let maxAddrInPartition = envSafe->EnvSafe.get("MAX_PARTITION_SIZE", S.int, ~fallback=5_000)
 
+let maxPartitionConcurrency =
+  envSafe->EnvSafe.get("ENVIO_MAX_PARTITION_CONCURRENCY", S.int->S.intMin(1), ~fallback=12)
+
+let sourceBlocksPerRequest =
+  envSafe->EnvSafe.get("ENVIO_SOURCE_BLOCKS_PER_REQUEST", S.option(S.int->S.intMin(1)))
+
 // Most parallel in-flight queries a single chain may have at once, across all
 // its partitions (consumed as FetchState.maxChainConcurrency).
-let maxChainConcurrency = 100
+let maxChainConcurrency =
+  envSafe->EnvSafe.get("ENVIO_MAX_CHAIN_CONCURRENCY", S.int->S.intMin(1), ~fallback=100)
 
 // Switch a single contract to client-side address filtering
 // once its registered address count crosses this threshold. Keeping addresses
