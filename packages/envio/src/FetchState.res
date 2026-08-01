@@ -120,6 +120,7 @@ type query = {
   fromBlock: int,
   toBlock: option<int>,
   isChunk: bool,
+  rangeReason: string,
   // Server-side maxNumLogs-style cap. Some only for open-ended probes, whose
   // range isn't otherwise bounded; None for bounded chunk/gap-fill queries,
   // whose toBlock already bounds the response so a cap would only self-truncate
@@ -351,6 +352,82 @@ module OptimizedPartitions = {
   let ascSortFn = (a, b) =>
     Int.compare(a.latestFetchedBlock.blockNumber, b.latestFetchedBlock.blockNumber)
 
+  let mergeSelection = (a: selection, b: selection) => {
+    let registrations = Dict.make()
+    a.onEventRegistrations->Array.forEach(reg =>
+      registrations->Dict.set(reg.index->Int.toString, reg)
+    )
+    b.onEventRegistrations->Array.forEach(reg =>
+      registrations->Dict.set(reg.index->Int.toString, reg)
+    )
+    makeSelection(~dependsOnAddresses=true, ~onEventRegistrations=registrations->Dict.valuesToArray)
+  }
+
+  let potentialJoinBlock = (p: partition) =>
+    switch p.mutPendingQueries->Utils.Array.last {
+    | Some({toBlock: Some(toBlock)}) => Some(toBlock)
+    | Some({toBlock: None}) => None
+    | None => Some(p.latestFetchedBlock.blockNumber)
+    }
+
+  let coalesceAddressBoundPartitions = (~partitions, ~maxAddrInPartition) => {
+    let stable = []
+    let candidates: array<(partition, int)> = []
+    partitions->Array.forEach(p =>
+      switch p {
+      | {selection: {dependsOnAddresses: true}, mergeBlock: None}
+        if p.selection.clientFilteredContracts->Option.isNone =>
+        switch p->potentialJoinBlock {
+        | Some(joinBlock) => candidates->Array.push((p, joinBlock))->ignore
+        | None => stable->Array.push(p)->ignore
+        }
+      | _ => stable->Array.push(p)->ignore
+      }
+    )
+
+    candidates->Array.sort(((_, a), (_, b)) => Int.compare(a, b))->ignore
+    switch candidates->Array.get(0) {
+    | None => stable
+    | Some(first) =>
+      let current = ref(first)
+      for idx in 1 to candidates->Array.length - 1 {
+        let (left, leftJoinBlock) = current.contents
+        let (right, rightJoinBlock) = candidates->Array.getUnsafe(idx)
+        let addresses = left.addresses->AddressSet.merge(right.addresses)
+        if addresses->AddressSet.size > maxAddrInPartition {
+          stable->Array.push(left)->ignore
+          current := (right, rightJoinBlock)
+        } else {
+          if leftJoinBlock < rightJoinBlock || left->isFetching {
+            stable->Array.push({...left, mergeBlock: Some(rightJoinBlock)})->ignore
+          }
+          let minRange = getMinQueryRange([left, right])
+          let eventDensity = switch (left->getTrustedDensity, right->getTrustedDensity) {
+          | (Some(a), Some(b)) => Some(a +. b)
+          | (Some(density), None) | (None, Some(density)) => Some(density)
+          | (None, None) => None
+          }
+          current :=
+            (
+              {
+                ...right,
+                selection: mergeSelection(left.selection, right.selection),
+                addresses,
+                sourceRangeCapacity: minRange,
+                prevSourceRangeCapacity: minRange,
+                eventDensity,
+                latestSourceRangeCapacityUpdateBlock: 0,
+              },
+              rightJoinBlock,
+            )
+        }
+      }
+      let (last, _) = current.contents
+      stable->Array.push(last)->ignore
+      stable
+    }
+  }
+
   // Contracts a standing address-free partition already fetches client-side.
   // Addresses registered for them after that partition passed get a normal
   // address-bound partition which dies once it catches up (see make), instead
@@ -456,41 +533,46 @@ module OptimizedPartitions = {
       {selection: {dependsOnAddresses: false}} =>
         newPartitions->Array.push(p)->ignore
       | {dynamicContract: Some(contractName)} =>
-        let pAddressesCount = p.addresses->AddressSet.countFor(contractName)
-        // Compute merge block: last pending query's toBlock, or lfb if idle
-        let potentialMergeBlock = switch p.mutPendingQueries->Utils.Array.last {
-        | Some({isChunk: true, toBlock: Some(toBlock)}) => Some(toBlock)
-        | Some(_) => None // unbounded query -- can't merge
-        | None => Some(p.latestFetchedBlock.blockNumber)
-        }
-        switch potentialMergeBlock {
-        | None => newPartitions->Array.push(p)->ignore
-        | Some(potentialMergeBlock) =>
-          if pAddressesCount >= maxAddrInPartition {
-            newPartitions->Array.push(p)->ignore
-          } else {
-            let partitionsByMergeBlock =
-              mergingPartitions->Utils.Dict.getOrInsertEmptyDict(contractName)
-            switch partitionsByMergeBlock->Utils.Dict.dangerouslyGetByIntNonOption(
-              potentialMergeBlock,
-            ) {
-            | Some(existingPartition) =>
-              let result = mergePartitionsAtBlock(
-                ~p1=existingPartition,
-                ~p2=p,
-                ~potentialMergeBlock,
-                ~contractName,
-                ~maxAddrInPartition,
-                ~nextPartitionIndexRef,
-              )
-              for i in 0 to result->Array.length - 2 {
-                newPartitions->Array.push(result->Array.getUnsafe(i))->ignore
-              }
-              partitionsByMergeBlock->Utils.Dict.setByInt(
+        let contractNames = p.addresses->AddressSet.contractNames
+        if contractNames->Array.length !== 1 || contractNames->Array.getUnsafe(0) !== contractName {
+          newPartitions->Array.push(p)->ignore
+        } else {
+          let pAddressesCount = p.addresses->AddressSet.countFor(contractName)
+          // Compute merge block: last pending query's toBlock, or lfb if idle
+          let potentialMergeBlock = switch p.mutPendingQueries->Utils.Array.last {
+          | Some({isChunk: true, toBlock: Some(toBlock)}) => Some(toBlock)
+          | Some(_) => None // unbounded query -- can't merge
+          | None => Some(p.latestFetchedBlock.blockNumber)
+          }
+          switch potentialMergeBlock {
+          | None => newPartitions->Array.push(p)->ignore
+          | Some(potentialMergeBlock) =>
+            if pAddressesCount >= maxAddrInPartition {
+              newPartitions->Array.push(p)->ignore
+            } else {
+              let partitionsByMergeBlock =
+                mergingPartitions->Utils.Dict.getOrInsertEmptyDict(contractName)
+              switch partitionsByMergeBlock->Utils.Dict.dangerouslyGetByIntNonOption(
                 potentialMergeBlock,
-                result->Utils.Array.lastUnsafe,
-              )
-            | None => partitionsByMergeBlock->Utils.Dict.setByInt(potentialMergeBlock, p)
+              ) {
+              | Some(existingPartition) =>
+                let result = mergePartitionsAtBlock(
+                  ~p1=existingPartition,
+                  ~p2=p,
+                  ~potentialMergeBlock,
+                  ~contractName,
+                  ~maxAddrInPartition,
+                  ~nextPartitionIndexRef,
+                )
+                for i in 0 to result->Array.length - 2 {
+                  newPartitions->Array.push(result->Array.getUnsafe(i))->ignore
+                }
+                partitionsByMergeBlock->Utils.Dict.setByInt(
+                  potentialMergeBlock,
+                  result->Utils.Array.lastUnsafe,
+                )
+              | None => partitionsByMergeBlock->Utils.Dict.setByInt(potentialMergeBlock, p)
+              }
             }
           }
         }
@@ -582,6 +664,11 @@ module OptimizedPartitions = {
       )
       anchored
     }
+
+    let finalPartitions = coalesceAddressBoundPartitions(
+      ~partitions=finalPartitions,
+      ~maxAddrInPartition,
+    )
 
     // Sort partitions by latestFetchedBlock ascending
     let _ = finalPartitions->Array.sort(ascSortFn)
@@ -1980,7 +2067,7 @@ let startFetchingQueries = ({optimizedPartitions}: t, ~queries: array<query>) =>
 // Only queries still being fetched count — a fetched chunk parked behind a gap
 // doesn't hold a slot, so a slow query at the queue head can't starve the
 // partition's pipeline.
-let maxInFlightChunksPerPartition = 12
+let maxInFlightChunksPerPartition = Env.maxPartitionConcurrency
 
 // Most parallel in-flight queries a single chain may have at once, across all
 // its partitions. Bounds source load on chains with many partitions, where the
@@ -2004,6 +2091,7 @@ let pushDensityPricedQuery = (
   ~fromBlock,
   ~toBlock,
   ~isChunk,
+  ~rangeReason,
   ~density,
   ~chainTargetBlock,
   ~selection,
@@ -2017,6 +2105,7 @@ let pushDensityPricedQuery = (
     toBlock,
     selection,
     isChunk,
+    rangeReason,
     itemsTarget: switch toBlock {
     | Some(_) => None
     | None => Some(itemsEst)
@@ -2072,6 +2161,7 @@ let pushGapFillQueries = (
           ~fromBlock=rangeFromBlock,
           ~toBlock=rangeEndBlock,
           ~isChunk,
+          ~rangeReason="gap_fill",
           ~density,
           ~chainTargetBlock,
           ~selection,
@@ -2094,6 +2184,7 @@ let pushGapFillQueries = (
               ~fromBlock=chunkFromBlock.contents,
               ~toBlock=Some(chunkToBlock),
               ~isChunk=true,
+              ~rangeReason="gap_fill",
               ~density,
               ~chainTargetBlock,
               ~selection,
@@ -2257,43 +2348,75 @@ let pushForwardCandidates = (
     | Some(eb) => eb
     | None => chainTargetBlock
     }
-    switch (fs.maybeChunkRange, p->getTrustedDensity) {
-    | (Some(minHistoryRange), Some(density)) if density > 0. =>
-      let chunkSize = Js.Math.ceil_int(minHistoryRange->Int.toFloat *. chunkRangeGrowthFactor)
+    let chunkPlan = switch Env.sourceBlocksPerRequest {
+    | Some(blocks) =>
+      Some((blocks, p->getTrustedDensity->Option.getOr(Pervasives.max(1., rangeTargetDensity))))
+    | None =>
+      switch (fs.maybeChunkRange, p->getTrustedDensity) {
+      | (Some(minHistoryRange), Some(density)) if density > 0. =>
+        Some((Js.Math.ceil_int(minHistoryRange->Int.toFloat *. chunkRangeGrowthFactor), density))
+      | _ => None
+      }
+    }
+    switch chunkPlan {
+    | Some((chunkSize, density)) =>
       let maxChunksRemaining =
         maxInFlightChunksPerPartition - fs.inFlightCount - fs.chunksUsedThisCall
       // No chunk starts past chainTargetBlock; an emitted chunk still keeps
       // its full span (chunkToBlock may exceed the target — only
       // endBlock/mergeBlock are hard bounds).
       let chunkStartCeiling = Pervasives.min(maxBlock, chainTargetBlock)
-      let created = ref(0)
-      let chunkFromBlock = ref(fs.cursor)
-      // Stop once this partition alone has generated more than the whole fresh
-      // budget: the acceptance pass can hand a single partition at most the
-      // budget plus one overshoot query, so further chunks could never be
-      // accepted. Bounds generation (and the candidate sort) when the budget
-      // is small relative to the pipeline cap.
-      let generatedItems = ref(0.)
-      while (
-        created.contents < maxChunksRemaining &&
-        chunkFromBlock.contents <= chunkStartCeiling &&
-        generatedItems.contents <= freshBudget
+      let availableBlocks = chunkStartCeiling - fs.cursor + 1
+      let finalBoundaryReached = switch fs.queryEndBlock {
+      | Some(endBlock) => endBlock <= chainTargetBlock
+      | None => false
+      }
+      if (
+        Env.sourceBlocksPerRequest->Option.isSome &&
+        availableBlocks < chunkSize &&
+        !finalBoundaryReached
       ) {
-        let chunkToBlock = Pervasives.min(chunkFromBlock.contents + chunkSize - 1, maxBlock)
-        let itemsEst =
-          candidates->pushDensityPricedQuery(
-            ~partitionId=fs.partitionId,
-            ~fromBlock=chunkFromBlock.contents,
-            ~toBlock=Some(chunkToBlock),
-            ~isChunk=true,
-            ~density,
-            ~chainTargetBlock,
-            ~selection=p.selection,
-            ~addresses=p.addresses,
-          )
-        generatedItems := generatedItems.contents +. itemsEst->Int.toFloat
-        chunkFromBlock := chunkToBlock + 1
-        created := created.contents + 1
+        ()
+      } else {
+        let created = ref(0)
+        let chunkFromBlock = ref(fs.cursor)
+        // Stop once this partition alone has generated more than the whole fresh
+        // budget: the acceptance pass can hand a single partition at most the
+        // budget plus one overshoot query, so further chunks could never be
+        // accepted. Bounds generation (and the candidate sort) when the budget
+        // is small relative to the pipeline cap.
+        let generatedItems = ref(0.)
+        while (
+          created.contents < maxChunksRemaining &&
+          chunkFromBlock.contents <= chunkStartCeiling &&
+          generatedItems.contents <= freshBudget
+        ) {
+          let chunkToBlock = Pervasives.min(chunkFromBlock.contents + chunkSize - 1, maxBlock)
+          let rangeReason = if chunkToBlock - chunkFromBlock.contents + 1 === chunkSize {
+            "full_range"
+          } else {
+            switch (p.mergeBlock, fs.queryEndBlock) {
+            | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => "merge_boundary"
+            | (_, Some(_)) => "end_boundary"
+            | _ => "full_range"
+            }
+          }
+          let itemsEst =
+            candidates->pushDensityPricedQuery(
+              ~partitionId=fs.partitionId,
+              ~fromBlock=chunkFromBlock.contents,
+              ~toBlock=Some(chunkToBlock),
+              ~isChunk=true,
+              ~rangeReason,
+              ~density,
+              ~chainTargetBlock,
+              ~selection=p.selection,
+              ~addresses=p.addresses,
+            )
+          generatedItems := generatedItems.contents +. itemsEst->Int.toFloat
+          chunkFromBlock := chunkToBlock + 1
+          created := created.contents + 1
+        }
       }
     | _ =>
       // Size the probe by the events its range to the target is expected to
@@ -2319,6 +2442,11 @@ let pushForwardCandidates = (
         fromBlock: fs.cursor,
         toBlock: fs.queryEndBlock,
         isChunk: false,
+        rangeReason: switch (p.mergeBlock, fs.queryEndBlock) {
+        | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => "merge_boundary"
+        | (_, Some(_)) => "end_boundary"
+        | _ => "adaptive"
+        },
         selection: p.selection,
         // An open-ended probe's range isn't bounded to source capacity, so it
         // keeps a server cap at its estimate to protect the shared buffer.

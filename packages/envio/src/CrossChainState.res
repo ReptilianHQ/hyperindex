@@ -106,18 +106,21 @@ let createBatch = (
   ~batchSizeTarget: int,
   ~isRollback: bool,
 ): Batch.t => {
-  Batch.make(
-    ~isInReorgThreshold=crossChainState.isInReorgThreshold,
-    ~checkpointIdBeforeBatch=processedCheckpointId->BigInt.add(
-      // Since for rollback we have a diff checkpoint id.
-      // This is needed to currectly overwrite old state
-      // in an append-only ClickHouse insert.
-      isRollback ? 1n : 0n,
-    ),
-    ~chainsBeforeBatch=crossChainState.chainStates->Utils.Dict.mapValues(
-      ChainState.toChainBeforeBatch,
-    ),
-    ~batchSizeTarget,
+  let attributes = Dict.make()
+  attributes->Dict.set("chain.indexer.batch.ready_items", crossChainState->totalReadyCount)
+  attributes->Dict.set("chain.indexer.batch.target_items", batchSizeTarget)
+  RuntimeHooks.tracePhase(
+    "batch_fill",
+    () =>
+      Batch.make(
+        ~isInReorgThreshold=crossChainState.isInReorgThreshold,
+        ~checkpointIdBeforeBatch=processedCheckpointId->BigInt.add(isRollback ? 1n : 0n),
+        ~chainsBeforeBatch=crossChainState.chainStates->Utils.Dict.mapValues(
+          ChainState.toChainBeforeBatch,
+        ),
+        ~batchSizeTarget,
+      ),
+    ~attributes,
   )
 }
 
@@ -412,7 +415,7 @@ let checkAndFetch = async (
     switch actionByChain->ChainId.Dict.dangerouslyGetNonOption(chainId) {
     | Some(NothingToQuery)
     | None => ()
-    | Some(action) => promises->Array.push(dispatchChain(~chainId=chainId, ~action))
+    | Some(action) => promises->Array.push(dispatchChain(~chainId, ~action))
     }
   }
   let _ = await promises->Promise.all

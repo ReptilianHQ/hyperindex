@@ -1,12 +1,13 @@
-name: Publish to NPM
+name: Publish Reptilian Envio runtime
 
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v3.5.0-reptilian.*"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  UPSTREAM_PLATFORM_VERSION: 3.5.0
 
 permissions:
   actions: read
@@ -14,33 +15,24 @@ permissions:
   id-token: write
 
 jobs:
-  # Determine npm tag from release tag name:
-  #   v1.2.3, v1.2.3-alpha.1, v1.2.3-rc.1 → next
-  #   anything else → dev
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      npm_tag: ${{ steps.tag.outputs.npm_tag }}
-      version: ${{ steps.tag.outputs.version }}
+      version: ${{ steps.version.outputs.version }}
       build_run_id: ${{ steps.find_build.outputs.run_id }}
     steps:
-      - name: Determine npm tag
-        id: tag
+      - name: Validate release version
+        id: version
+        shell: bash
         run: |
-          TAG="${{ github.ref_name }}"
-          VERSION=$(echo "$TAG" | sed 's/^v//')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-          # Valid semver or semver with -alpha/-rc prerelease → next
-          if echo "$VERSION" | grep -qP '^\d+\.\d+\.\d+(-(?:alpha|rc)\.\d+)?$'; then
-            echo "npm_tag=next" >> "$GITHUB_OUTPUT"
-            echo "Tag: next"
-          else
-            echo "npm_tag=dev" >> "$GITHUB_OUTPUT"
-            echo "Tag: dev"
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^3\.5\.0-reptilian\.[0-9]+$ ]]; then
+            echo "Unsupported fork version: $version"
+            exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Find successful Build & Verify run for this commit
+      - name: Find successful Build & Verify run
         id: find_build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,22 +44,10 @@ jobs:
             exit 1
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-          echo "Found run: $run_id"
 
-  # Build all 4 platform packages with the release version baked into the binary
-  build-platforms:
+  publish:
+    runs-on: ubuntu-latest
     needs: prepare
-    uses: ./.github/workflows/build-platforms.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-
-  # Publish all 4 platform packages to npm
-  publish-platform-packages:
-    runs-on: ubuntu-latest
-    needs: [prepare, build-platforms]
-    strategy:
-      matrix:
-        pkg: [envio-linux-x64, envio-linux-x64-musl, envio-linux-arm64, envio-darwin-x64, envio-darwin-arm64]
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -75,42 +55,7 @@ jobs:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
 
-      - name: Download platform package
-        uses: actions/download-artifact@v8
-        with:
-          name: npm-pkg-${{ matrix.pkg }}
-          path: ./pkg
-
-      - name: Patch version and publish
-        working-directory: ./pkg
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          if [ ! -f envio.node ]; then
-            echo "ERROR: envio.node not found in platform package"
-            exit 1
-          fi
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.version = process.env.VERSION;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          echo "Publishing $(node -p "require('./package.json').name")@${VERSION}"
-          npm publish --access public --tag latest
-
-  # Publish the base envio package to npm
-  publish-envio-package:
-    runs-on: ubuntu-latest
-    needs: [prepare, publish-platform-packages]
-    steps:
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Download envio base package from Build & Verify
+      - name: Download verified Envio artifact
         uses: actions/download-artifact@v8
         with:
           name: npm-pkg-envio
@@ -118,23 +63,32 @@ jobs:
           run-id: ${{ needs.prepare.outputs.build_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Patch version and publish
+      - name: Set scoped package identity
         working-directory: ./pkg
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-          NPM_TAG: ${{ needs.prepare.outputs.npm_tag }}
         run: |
-          # Patch version and optionalDependencies versions
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.name = "@reptilianhq/envio";
             pkg.version = process.env.VERSION;
-            if (pkg.optionalDependencies) {
-              for (const dep of Object.keys(pkg.optionalDependencies)) {
-                pkg.optionalDependencies[dep] = process.env.VERSION;
-              }
-            }
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          echo "Publishing envio@${VERSION} with tag ${NPM_TAG}"
-          npm publish --access public --tag "$NPM_TAG"
+            pkg.repository = {
+              type: "git",
+              url: "git+https://github.com/ReptilianHQ/hyperindex.git"
+            };
+            pkg.optionalDependencies = Object.fromEntries(
+              Object.keys(pkg.optionalDependencies ?? {}).map(name => [
+                name,
+                process.env.UPSTREAM_PLATFORM_VERSION
+              ])
+            );
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
+          npm pack --dry-run
+
+      - name: Publish scoped runtime
+        working-directory: ./pkg
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: npm publish --access public --tag reptilian --provenance
