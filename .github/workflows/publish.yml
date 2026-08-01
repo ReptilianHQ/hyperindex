@@ -86,6 +86,7 @@ jobs:
               type: "git",
               url: "git+https://github.com/ReptilianHQ/hyperindex.git"
             };
+            pkg.bin = { envio: "bin.mjs" };
             pkg.optionalDependencies = Object.fromEntries(
               Object.keys(pkg.optionalDependencies ?? {}).map(name => [
                 name,
