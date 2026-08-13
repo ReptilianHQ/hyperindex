@@ -22,7 +22,7 @@ export default defineConfig({
     maxWorkers: 1,
     testTimeout: 30_000,
     hookTimeout: 30_000,
-    setupFiles: ["test/setup.ts"],
+    setupFiles: ["test/setup.mjs"],
     passWithNoTests: true,
     server: {
       deps: {
