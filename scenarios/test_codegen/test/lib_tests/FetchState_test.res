@@ -3110,7 +3110,7 @@ describe("FetchState unit tests for specific cases", () => {
             prevSourceRangeCapacity: 0,
             latestSourceRangeCapacityUpdateBlock: 0,
             selection: normalSelection,
-            addresses: TestAddresses.setOf([]),
+            addresses: TestAddresses.setOf(~store=addressStore, []),
             mergeBlock: None,
           },
           {
@@ -3123,7 +3123,7 @@ describe("FetchState unit tests for specific cases", () => {
             prevSourceRangeCapacity: 0,
             latestSourceRangeCapacityUpdateBlock: 0,
             selection: normalSelection,
-            addresses: TestAddresses.setOf([]),
+            addresses: TestAddresses.setOf(~store=addressStore, []),
             mergeBlock: None,
           },
         ],

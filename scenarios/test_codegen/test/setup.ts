@@ -1,3 +1,3 @@
-// Importing Env triggers Logging.setLogger as a side effect,
-// ensuring the logger is available for all tests.
-import "envio/src/Env.res.mjs";
+process.env.ENVIO_API_TOKEN ||= "offline-tests";
+
+await import("envio/src/Env.res.mjs");

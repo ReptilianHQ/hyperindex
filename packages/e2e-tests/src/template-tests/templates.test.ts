@@ -188,7 +188,7 @@ function templateTest({ name, initArgs, hasTests, offlineTestPattern }: Template
 
   it.skipIf(!hasTests)("runs tests successfully", async () => {
     const testArgs = offlineTestPattern
-      ? ["test", "--", "--testNamePattern", offlineTestPattern]
+      ? ["test", "--testNamePattern", offlineTestPattern]
       : ["test"];
     const result = await runCommand("pnpm", testArgs, {
       cwd: projectDir,

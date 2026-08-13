@@ -785,9 +785,15 @@ let executeQuery = async (
         ~retry,
         ~logger,
       )
-      let response = await request->Promise.finally(() =>
+      let response = try {
+        let response = await request
         safelyRecord(() => RuntimeHooks.recordSourceRequest("finish", query.partitionId))
-      )
+        response
+      } catch {
+      | exn =>
+        safelyRecord(() => RuntimeHooks.recordSourceRequest("finish", query.partitionId))
+        throw(exn)
+      }
       switch (source.poweredByHyperSync, toBlock) {
       | (true, Some(requestedToBlock)) =>
         safelyRecord(() =>

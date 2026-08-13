@@ -547,7 +547,7 @@ describe("SourceManager fetchNext", () => {
       ).toEqual([
         {
           partitionId: "2",
-          rangeReason: "test",
+          rangeReason: "adaptive",
           itemsTarget: Some(16_667),
           itemsEst: 16_667,
           fromBlock: 2,
@@ -558,7 +558,7 @@ describe("SourceManager fetchNext", () => {
         },
         {
           partitionId: "0",
-          rangeReason: "test",
+          rangeReason: "adaptive",
           // Starts at block 5 vs partition "2"'s block 2, so it covers less of
           // the range to the target and gets a smaller probe.
           itemsTarget: Some(11_111),
@@ -571,7 +571,7 @@ describe("SourceManager fetchNext", () => {
         },
         {
           partitionId: "1",
-          rangeReason: "test",
+          rangeReason: "adaptive",
           // Starts furthest ahead (block 6), so it gets the smallest probe.
           itemsTarget: Some(9_259),
           itemsEst: 9_259,
