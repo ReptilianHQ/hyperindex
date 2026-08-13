@@ -6,7 +6,9 @@
   "scripts": {
     "build": "rescript",
     "watch": "rescript watch",
-    "test": "rescript && vitest run"
+    "test": "rescript && vitest run",
+    "test:offline": "rescript && vitest run --exclude test/HyperSyncClient_test.res.mjs --exclude test/HyperSync_test.res.mjs --exclude test/SvmHyperSyncClient_test.res.mjs",
+    "test:hypersync-live": "rescript && vitest run test/HyperSyncClient_test.res.mjs test/HyperSync_test.res.mjs"
   },
   "devDependencies": {
     "@rescript/runtime": "12.2.0",

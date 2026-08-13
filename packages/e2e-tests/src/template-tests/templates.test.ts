@@ -17,6 +17,7 @@ interface TemplateConfig {
   name: string;
   initArgs: string[];
   hasTests?: boolean;
+  offlineEvmTests?: boolean;
 }
 
 const fuelGreeterAbi = path.join(config.rootDir, "packages/e2e-tests/fixtures/fuel-greeter-abi.json");
@@ -28,16 +29,19 @@ const TEMPLATES: TemplateConfig[] = [
     name: "evm-greeter",
     initArgs: ["template", "-t", "greeter", "-l", "typescript"],
     hasTests: true,
+    offlineEvmTests: true,
   },
   {
     name: "evm-erc20",
     initArgs: ["template", "-t", "erc20", "-l", "typescript"],
     hasTests: true,
+    offlineEvmTests: true,
   },
   {
     name: "evm-factory",
     initArgs: ["template", "-t", "feature-factory", "-l", "typescript"],
     hasTests: true,
+    offlineEvmTests: true,
   },
   {
     name: "evm-external-calls",
@@ -58,6 +62,7 @@ const TEMPLATES: TemplateConfig[] = [
   {
     name: "evm-contract-import-ts",
     hasTests: true,
+    offlineEvmTests: true,
     initArgs: [
       "contract-import",
       "-c",
@@ -74,6 +79,7 @@ const TEMPLATES: TemplateConfig[] = [
   {
     name: "evm-contract-import-rescript",
     hasTests: true,
+    offlineEvmTests: true,
     initArgs: [
       "contract-import",
       "-c",
@@ -133,7 +139,20 @@ const TEMPLATES: TemplateConfig[] = [
   },
 ];
 
-function templateTest({ name, initArgs, hasTests }: TemplateConfig) {
+function useOfflineEvmSource(projectDir: string) {
+  const configPath = path.join(projectDir, "config.yaml");
+  const source = fs.readFileSync(configPath, "utf8");
+  const rewritten = source.replace(
+    /^(\s*)- id: (\d+)\s*$/gm,
+    "$&\n$1  rpc:\n$1    url: http://127.0.0.1:9\n$1    for: sync"
+  );
+  if (rewritten === source) {
+    throw new Error(`No EVM chain entries found in ${configPath}`);
+  }
+  fs.writeFileSync(configPath, rewritten);
+}
+
+function templateTest({ name, initArgs, hasTests, offlineEvmTests }: TemplateConfig) {
   let projectDir: string;
 
   beforeAll(async () => {
@@ -161,6 +180,10 @@ function templateTest({ name, initArgs, hasTests }: TemplateConfig) {
     );
 
     expect(result.exitCode, `[${name}] init failed (exit ${result.exitCode}):\n${result.stderr}\n${result.stdout}`).toBe(0);
+
+    // Generated handler tests supply synthetic events and must not cross the
+    // live HyperSync boundary merely because templates default to HyperSync.
+    if (offlineEvmTests) useOfflineEvmSource(projectDir);
   }, config.timeouts.install + 10_000);
 
   it("installs dependencies", async () => {
