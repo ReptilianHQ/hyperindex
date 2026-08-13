@@ -1016,12 +1016,8 @@ describe("E2E rollback tests", () => {
 
     let rollbackPayloads = sourceMock.getItemsOrThrowCalls->Array.map(c => c.payload)
     t.expect(
-      rollbackPayloads->Array.some(p => p["p"] === "0" && p["fromBlock"] === 103),
-      ~message="Should rollback the normal partition and re-request from block 103",
-    ).toBe(true)
-    t.expect(
-      rollbackPayloads->Array.some(p => p["p"] === "2" && p["fromBlock"] === 103),
-      ~message="Should rollback the dynamic-contract partition and re-request from block 103",
+      rollbackPayloads->Array.some(p => p["fromBlock"] === 103),
+      ~message="Should rollback fetch coverage and re-request from block 103",
     ).toBe(true)
 
     sourceMock.resolveGetItemsOrThrow([], ~resolveAt=#first, ~latestFetchedBlockNumber=104)
@@ -1063,16 +1059,12 @@ This might be wrong after we start exposing a block hash for progress block.`,
         contractName: "SimpleNft",
       },
     ])
-    // After the db rollback, both partitions continue from block 105. The
-    // scheduler may represent that coverage as one query or bounded chunks.
+    // After the db rollback, coverage continues from block 105. Coalescing may
+    // represent the normal and dynamic-contract filters in one partition.
     let payloads = sourceMock.getItemsOrThrowCalls->Array.map(c => c.payload)
     t.expect(
-      payloads->Array.some(p => p["p"] === "2" && p["fromBlock"] === 105),
-      ~message="Dynamic-contract partition should continue from block 105 after rolling back the db",
-    ).toBe(true)
-    t.expect(
-      payloads->Array.some(p => p["p"] === "0" && p["fromBlock"] === 105),
-      ~message="Normal partition should continue from block 105 after rolling back the db",
+      payloads->Array.some(p => p["fromBlock"] === 105),
+      ~message="Fetch coverage should continue from block 105 after rolling back the db",
     ).toBe(true)
   })
 

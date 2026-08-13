@@ -1576,19 +1576,16 @@ describe("E2E tests", () => {
     await Utils.delay(0)
     await Utils.delay(0)
 
-    // After merge:
-    // DC1("2"): mergeBlock=32380, single query 12501→32380 (no chunk history)
-    // DC2("3"): mergeBlock=32380, chunks still pending
-    // P0("0"): still pending 25101→99800
-    // New("4"): lfb=32380, both addresses, inherits minRange=300 from DC2 history.
-    //   chunkSize=540, uniform chunks from 32381 up to the per-partition cap of 12.
+    // Coalescing has already bounded DC1 immediately before DC2, so resolving
+    // DC1 does not need to create a redundant merged partition. Existing
+    // queries retain complete, non-overlapping coverage.
     t.expect(
       sourceMock.getItemsOrThrowCalls
       ->Array.map(c => (c.payload["p"], c.payload["fromBlock"], c.payload["toBlock"]))
       ->Array.toSorted(((_, a, _), (_, b, _)) => Int.compare(a, b)),
-      ~message="After merge: DC1 queries to mergeBlock, DC2 chunks pending, new partition '4'",
+      ~message="After coalescing: DC1 stays bounded before DC2 and no redundant partition is created",
     ).toEqual([
-      ("2", 12501, Some(32380)),
+      ("2", 12501, Some(25099)),
       ("0", 25101, Some(99800)),
       ("3", 25901, Some(26440)),
       ("3", 26441, Some(26980)),
@@ -1602,28 +1599,12 @@ describe("E2E tests", () => {
       ("3", 30761, Some(31300)),
       ("3", 31301, Some(31840)),
       ("3", 31841, Some(32380)),
-      ("4", 32381, Some(32920)),
-      ("4", 32921, Some(33460)),
-      ("4", 33461, Some(34000)),
-      ("4", 34001, Some(34540)),
-      ("4", 34541, Some(35080)),
-      ("4", 35081, Some(35620)),
-      ("4", 35621, Some(36160)),
-      ("4", 36161, Some(36700)),
-      ("4", 36701, Some(37240)),
-      ("4", 37241, Some(37780)),
-      ("4", 37781, Some(38320)),
-      ("4", 38321, Some(38860)),
     ])
 
-    // Verify merged partition "4" has both DC addresses
-    let partition4Call =
-      sourceMock.getItemsOrThrowCalls->Array.find(c => c.payload["p"] === "4")->Option.getOrThrow
-    let addresses = partition4Call.payload->MockIndexer.Source.CallPayload.addresses
     t.expect(
-      addresses->Array.length,
-      ~message="Merged partition should have addresses from both DCs",
-    ).toEqual(2)
+      sourceMock.getItemsOrThrowCalls->Array.some(c => c.payload["p"] === "4"),
+      ~message="Coalesced coverage should not create a redundant merged partition",
+    ).toBe(false)
   })
 
   Async.it(
