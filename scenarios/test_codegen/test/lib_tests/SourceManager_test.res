@@ -4,6 +4,7 @@ open Vitest
 // every other field is overridden at the call site.
 let defaultQuery: FetchState.query = {
   partitionId: "0",
+  rangeReason: "test",
   fromBlock: 0,
   toBlock: None,
   isChunk: false,
@@ -180,6 +181,7 @@ describe("SourceManager source priority with Live sources", () => {
 
   let mockQuery = (): FetchState.query => {
     partitionId: "0",
+    rangeReason: "test",
     itemsTarget: Some(5000),
     itemsEst: 5000,
     fromBlock: 0,
@@ -545,6 +547,7 @@ describe("SourceManager fetchNext", () => {
       ).toEqual([
         {
           partitionId: "2",
+          rangeReason: "adaptive",
           itemsTarget: Some(16_667),
           itemsEst: 16_667,
           fromBlock: 2,
@@ -555,6 +558,7 @@ describe("SourceManager fetchNext", () => {
         },
         {
           partitionId: "0",
+          rangeReason: "adaptive",
           // Starts at block 5 vs partition "2"'s block 2, so it covers less of
           // the range to the target and gets a smaller probe.
           itemsTarget: Some(11_111),
@@ -567,6 +571,7 @@ describe("SourceManager fetchNext", () => {
         },
         {
           partitionId: "1",
+          rangeReason: "adaptive",
           // Starts furthest ahead (block 6), so it gets the smallest probe.
           itemsTarget: Some(9_259),
           itemsEst: 9_259,
@@ -1435,6 +1440,7 @@ describe("SourceManager.executeQuery", () => {
 
   let mockQuery = (): FetchState.query => {
     partitionId: "0",
+    rangeReason: "test",
     itemsTarget: Some(5000),
     itemsEst: 5000,
     fromBlock: 0,

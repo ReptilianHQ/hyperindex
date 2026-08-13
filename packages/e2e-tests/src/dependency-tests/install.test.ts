@@ -36,7 +36,7 @@ const PACKAGE_MANAGERS: PmConfig[] = [
   { pm: "pnpm", installArgs: ["install"] },
 ];
 
-describe("Isolated dependency e2e", () => {
+describe.skipIf(!process.env.ENVIO_API_TOKEN)("Isolated dependency e2e", () => {
   let tmpRoot: string;
   let baseProjectDir: string;
 

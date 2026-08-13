@@ -7,7 +7,26 @@ describe("Indexer Testing", () => {
 
     t.expect(
       await indexer.process({
-        chains: { 1: { startBlock: 12_369_739, endBlock: 12_369_739 } },
+        chains: {
+          1: {
+            startBlock: 12_369_739,
+            endBlock: 12_369_739,
+            simulate: [
+              {
+                contract: "UniswapV3Factory",
+                event: "PoolCreated",
+                params: {
+                  token0: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                  token1: "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
+                  fee: 3000n,
+                  tickSpacing: 60n,
+                  pool: "0x1d42064Fc4Beb5F8aAF85F4617AE8b3b5B8Bd801",
+                },
+                block: { number: 12_369_739 },
+              },
+            ],
+          },
+        },
       }),
       "Should register the UNI/ETH pool at block 12369739"
     ).toMatchInlineSnapshot(`
@@ -32,7 +51,30 @@ describe("Indexer Testing", () => {
 
     t.expect(
       await indexer.process({
-        chains: { 1: { startBlock: 12_373_187, endBlock: 12_373_187 } },
+        chains: {
+          1: {
+            startBlock: 12_373_187,
+            endBlock: 12_373_187,
+            simulate: [
+              {
+                contract: "UniswapV3Pool",
+                event: "Swap",
+                params: {
+                  sender: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+                  recipient: "0x0459B3FBf7c1840ee03a63ca4AA95De48322322e",
+                  amount0: -3000000000000000000n,
+                  amount1: 39159647513529870n,
+                  sqrtPriceX96: 9150855777021942113750115245n,
+                  liquidity: 13823839187817749392n,
+                  tick: -43137n,
+                },
+                srcAddress: "0x1d42064Fc4Beb5F8aAF85F4617AE8b3b5B8Bd801",
+                block: { number: 12_373_187 },
+                logIndex: 275,
+              },
+            ],
+          },
+        },
       }),
       "Should handle swap event on the registered pool at block 12373187"
     ).toMatchInlineSnapshot(`
@@ -44,8 +86,7 @@ describe("Indexer Testing", () => {
                 {
                   "amount0": -3000000000000000000n,
                   "amount1": 39159647513529870n,
-                  "chainId": 1,
-                  "id": "1_12373187_275",
+                  "id": "12373187_275",
                   "liquidity": 13823839187817749392n,
                   "pool": "0x1d42064Fc4Beb5F8aAF85F4617AE8b3b5B8Bd801",
                   "recipient": "0x0459B3FBf7c1840ee03a63ca4AA95De48322322e",

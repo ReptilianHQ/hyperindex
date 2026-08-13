@@ -64,8 +64,13 @@ module Gate = {
 }
 
 module InMemoryStore = {
-  let setEntity = (indexerState, ~entityConfig: Internal.entityConfig, entity) => {
-    let inMemTable = indexerState->InMemoryStore.getInMemTable(~entityConfig)
+  let setEntity = (
+    indexerState,
+    ~entityConfig: Internal.entityConfig,
+    ~scope=Internal.CrossChain,
+    entity,
+  ) => {
+    let inMemTable = indexerState->InMemoryStore.getInMemTable(~entityConfig, ~scope)
     let entity = entity->(Utils.magic: 'a => Internal.entity)
     inMemTable->InMemoryTable.Entity.set(
       ~committedCheckpointId=indexerState->IndexerState.committedCheckpointId,
@@ -262,6 +267,7 @@ module Storage = {
         pruneStaleEntityHistory: async (
           ~entityName as _,
           ~entityIndex as _,
+          ~chainIdColumn as _,
           ~safeCheckpointId as _,
         ) => (),
         getRollbackTargetCheckpoint: (~reorgChainId as _, ~lastKnownValidBlockNumber as _) =>
@@ -448,7 +454,6 @@ module Indexer = {
     value: string,
     labels: dict<string>,
   }
-  type graphqlResponse<'a> = {data?: {..} as 'a}
   type rec t = {
     getBatchWritePromise: unit => promise<unit>,
     getRollbackReadyPromise: unit => promise<unit>,
@@ -467,7 +472,6 @@ module Indexer = {
     // a later test resetting the schema would take their writes into it.
     stop: unit => promise<unit>,
     restart: unit => promise<t>,
-    graphql: 'data. string => promise<graphqlResponse<'data>>,
   }
 
   type chainConfig = {
@@ -484,9 +488,6 @@ module Indexer = {
     // Defaults to the generated project config.
     ~config as customConfig: option<Config.t>=?,
     ~saveFullHistory=false,
-    // Reinit storage without Hasura
-    // makes tests ~1.9 seconds faster
-    ~enableHasura=false,
     ~enableRawEvents=false,
     ~reset=true,
     ~batchSize=?,
@@ -577,7 +578,8 @@ module Indexer = {
     let sql = PgStorage.makeClient()
     let pgSchema = Env.Db.publicSchema
     let storage = mapStorage(
-      PgStorage.makeStorageFromEnv(~config, ~sql, ~pgSchema, ~isHasuraEnabled=enableHasura),
+      // Tracking tables in Hasura costs ~1.9 seconds per indexer.
+      PgStorage.makeStorageFromEnv(~config, ~sql, ~pgSchema, ~isHasuraEnabled=false),
     )
     let persistence = PgStorage.makePersistenceFromConfig(~config, ~storage)
 
@@ -588,14 +590,6 @@ module Indexer = {
         NodeJs.process->NodeJs.exitWithCode(NodeJs.Failure)
       }
     }
-
-    let graphqlClient = Rest.client(`${Env.Hasura.url}/v1/graphql`)
-    let graphqlRoute = Rest.route(() => {
-      method: Post,
-      path: "",
-      input: s => s.field("query", S.string),
-      responses: [s => s.data(S.unknown)],
-    })
 
     await persistence->Persistence.init(
       ~chainConfigs=config.chainMap->ChainMap.values,
@@ -869,7 +863,6 @@ module Indexer = {
         await make(
           ~chains,
           ~config=?customConfig,
-          ~enableHasura,
           ~enableRawEvents,
           ~saveFullHistory,
           ~reset=false,
@@ -884,17 +877,6 @@ module Indexer = {
           ~onExit?,
           ~mapStorage,
         )
-      },
-      graphql: query => {
-        if !enableHasura {
-          JsError.throwWithMessage(
-            "It's require to set ~enableHasura=true during indexer mock creation to access this feature.",
-          )
-        }
-
-        graphqlRoute
-        ->Rest.fetch(query, ~client=graphqlClient)
-        ->(Utils.magic: promise<unknown> => promise<graphqlResponse<{..}>>)
       },
     }
   }

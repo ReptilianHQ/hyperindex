@@ -11,12 +11,66 @@ describe("Indexer smoke test", () => {
     async (t) => {
       const indexer = createTestIndexer();
 
-      const result = await indexer.process({ chains: { 1: {} } });
+      const result = await indexer.process({
+        chains: {
+          1: {
+            startBlock: 10861674,
+            endBlock: 10861674,
+            simulate: [
+              {
+                contract: "ERC20",
+                event: "Transfer",
+                params: {
+                  from: "0x0000000000000000000000000000000000000000",
+                  to: "0x41653c7d61609D856f29355E404F310Ec4142Cfb",
+                  value: 1000000000000000000000000000n,
+                },
+                block: { number: 10861674 },
+                logIndex: 23,
+                transaction: {
+                  hash: "0x4b37d2f343608457ca3322accdab2811c707acf3eb07a40dd8d9567093ea5b82",
+                },
+              },
+            ],
+          },
+        },
+      });
 
       t.expect(result).toMatchInlineSnapshot(`
         {
           "changes": [
             {
+              "ChainAccount": {
+                "sets": [
+                  {
+                    "id": "0x0000000000000000000000000000000000000000",
+                  },
+                ],
+              },
+              "ChainTransfer": {
+                "sets": [
+                  {
+                    "from": "0x0000000000000000000000000000000000000000",
+                    "id": "1-10861674-23",
+                    "value": 1000000000000000000000000000n,
+                  },
+                ],
+              },
+              "NumericArrays": {
+                "sets": [
+                  {
+                    "bigDecimals": [
+                      "3.3",
+                      "123456789012345678.123456789",
+                    ],
+                    "bigInts": [
+                      9007199254740993n,
+                      1000000000000000000000000000n,
+                    ],
+                    "id": "1",
+                  },
+                ],
+              },
               "Transfer": {
                 "sets": [
                   {

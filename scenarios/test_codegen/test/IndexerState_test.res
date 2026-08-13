@@ -4,6 +4,7 @@ open Vitest
 // every other field is overridden at the call site.
 let defaultQuery: FetchState.query = {
   partitionId: "0",
+  rangeReason: "test",
   fromBlock: 0,
   toBlock: None,
   isChunk: false,
@@ -89,6 +90,7 @@ let populateChainQueuesWithRandomEvents = (~runTime=1000, ~maxBlockTime=15, ()) 
 
         let query: FetchState.query = {
           partitionId: "0",
+          rangeReason: "test",
           itemsTarget: Some(0),
           itemsEst: 0,
           fromBlock: 0,
@@ -276,6 +278,7 @@ describe("IndexerState", () => {
             blockNumber => {
               let query: FetchState.query = {
                 partitionId: "0",
+                rangeReason: "test",
                 itemsTarget: Some(0),
                 itemsEst: 0,
                 fromBlock: 0,
@@ -358,6 +361,7 @@ describe("IndexerState", () => {
         let cs = state->IndexerState.getChainState(~chainId)
         let concurrentQuery: FetchState.query = {
           partitionId: "0",
+          rangeReason: "test",
           itemsTarget: Some(0),
           itemsEst: 0,
           fromBlock: 0,
@@ -369,7 +373,7 @@ describe("IndexerState", () => {
         cs->ChainState.startFetchingQueries(~queries=[concurrentQuery])
         cs->ChainState.handleQueryResult(
           ~query=concurrentQuery,
-          ~newItemsWithDcs=[],
+          ~newRegistrations=[],
           ~latestFetchedBlock={blockNumber: 15, blockTimestamp: 15 * 15},
           ~newItems=[
             Internal.Event({

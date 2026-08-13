@@ -45,7 +45,10 @@ describe("Reptilian fetch planning", () => {
     let store = AddressStore.make(
       ~ecosystem=Ecosystem.Evm,
       ~shouldChecksum=false,
-      ~contracts=[{name: "Token", startBlock: None}, {name: "Pool", startBlock: None}],
+      ~contracts=[
+        {name: "Token", startBlock: None, dependsOnAddresses: true},
+        {name: "Pool", startBlock: None, dependsOnAddresses: true},
+      ],
     )
     let _ = store->AddressStore.registerBatch([
       {

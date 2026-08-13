@@ -941,7 +941,7 @@ describe("Use Envio test framework to test event handlers", () => {
     // Start processing (don't await)
     testIndexer.process({
       chains: {
-        1: { startBlock: 1, endBlock: 100 },
+        1: { startBlock: 1, endBlock: 100, simulate: [] },
       },
     });
 
@@ -959,6 +959,7 @@ describe("Use Envio test framework to test event handlers", () => {
         1: {
           startBlock: 1,
           endBlock: 100,
+          simulate: [],
         },
       },
     });
@@ -1108,7 +1109,7 @@ describe("Use Envio test framework to test event handlers", () => {
     // Start first process (don't await)
     const firstProcess = indexer.process({
       chains: {
-        1: { startBlock: 1, endBlock: 100 },
+        1: { startBlock: 1, endBlock: 100, simulate: [] },
       },
     });
 
@@ -1117,7 +1118,7 @@ describe("Use Envio test framework to test event handlers", () => {
       () =>
         indexer.process({
           chains: {
-            1: { startBlock: 1, endBlock: 100 },
+            1: { startBlock: 1, endBlock: 100, simulate: [] },
           },
         }),
       {
@@ -1193,7 +1194,7 @@ describe("Use Envio test framework to test event handlers", () => {
 
     const result = await testIndexer.process({
       chains: {
-        1: { startBlock: 1, endBlock: 100 },
+        1: { startBlock: 1, endBlock: 100, simulate: [] },
       },
     });
 
@@ -1290,7 +1291,7 @@ describe("Use Envio test framework to test event handlers", () => {
     // Start processing (don't await - we're testing the error during processing)
     indexer.process({
       chains: {
-        1: { startBlock: 1, endBlock: 100 },
+        1: { startBlock: 1, endBlock: 100, simulate: [] },
       },
     });
 
@@ -1315,7 +1316,7 @@ describe("Use Envio test framework to test event handlers", () => {
     // Start processing (don't await - we're testing the error during processing)
     indexer.process({
       chains: {
-        1: { startBlock: 1, endBlock: 100 },
+        1: { startBlock: 1, endBlock: 100, simulate: [] },
       },
     });
 

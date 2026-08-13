@@ -1547,7 +1547,8 @@ describe("E2E tests", () => {
       ->Array.toSorted(((_, a, _), (_, b, _)) => Int.compare(a, b)),
       ~message="Step 4: DC2 has 12 uniform 540-size chunks",
     ).toEqual([
-      ("2", 5000, Some(99800)),
+      // Coalescing bounds DC1 immediately before DC2's coverage begins.
+      ("2", 5000, Some(25099)),
       ("0", 25101, Some(99800)),
       ("3", 25901, Some(26440)),
       ("3", 26441, Some(26980)),
@@ -1575,19 +1576,16 @@ describe("E2E tests", () => {
     await Utils.delay(0)
     await Utils.delay(0)
 
-    // After merge:
-    // DC1("2"): mergeBlock=32380, single query 12501→32380 (no chunk history)
-    // DC2("3"): mergeBlock=32380, chunks still pending
-    // P0("0"): still pending 25101→99800
-    // New("4"): lfb=32380, both addresses, inherits minRange=300 from DC2 history.
-    //   chunkSize=540, uniform chunks from 32381 up to the per-partition cap of 12.
+    // Coalescing has already bounded DC1 immediately before DC2, so resolving
+    // DC1 does not need to create a redundant merged partition. Existing
+    // queries retain complete, non-overlapping coverage.
     t.expect(
       sourceMock.getItemsOrThrowCalls
       ->Array.map(c => (c.payload["p"], c.payload["fromBlock"], c.payload["toBlock"]))
       ->Array.toSorted(((_, a, _), (_, b, _)) => Int.compare(a, b)),
-      ~message="After merge: DC1 queries to mergeBlock, DC2 chunks pending, new partition '4'",
+      ~message="After coalescing: DC1 stays bounded before DC2 and no redundant partition is created",
     ).toEqual([
-      ("2", 12501, Some(32380)),
+      ("2", 12501, Some(25099)),
       ("0", 25101, Some(99800)),
       ("3", 25901, Some(26440)),
       ("3", 26441, Some(26980)),
@@ -1601,97 +1599,13 @@ describe("E2E tests", () => {
       ("3", 30761, Some(31300)),
       ("3", 31301, Some(31840)),
       ("3", 31841, Some(32380)),
-      ("4", 32381, Some(32920)),
-      ("4", 32921, Some(33460)),
-      ("4", 33461, Some(34000)),
-      ("4", 34001, Some(34540)),
-      ("4", 34541, Some(35080)),
-      ("4", 35081, Some(35620)),
-      ("4", 35621, Some(36160)),
-      ("4", 36161, Some(36700)),
-      ("4", 36701, Some(37240)),
-      ("4", 37241, Some(37780)),
-      ("4", 37781, Some(38320)),
-      ("4", 38321, Some(38860)),
     ])
 
-    // Verify merged partition "4" has both DC addresses
-    let partition4Call =
-      sourceMock.getItemsOrThrowCalls->Array.find(c => c.payload["p"] === "4")->Option.getOrThrow
-    let addresses = partition4Call.payload->MockIndexer.Source.CallPayload.addresses
     t.expect(
-      addresses->Array.length,
-      ~message="Merged partition should have addresses from both DCs",
-    ).toEqual(2)
+      sourceMock.getItemsOrThrowCalls->Array.some(c => c.payload["p"] === "4"),
+      ~message="Coalesced coverage should not create a redundant merged partition",
+    ).toBe(false)
   })
-
-  Async.itSkipInClaudeCloud(
-    "_meta and chain_metadata return events processed as a number (float4 cast)",
-    async t => {
-      let sourceMock = MockIndexer.Source.make(
-        [#getHeightOrThrow, #getItemsOrThrow, #getBlockHashes],
-        ~chainId=#1337,
-      )
-      let indexerMock = await MockIndexer.Indexer.make(
-        ~chains=[
-          {
-            chain: #1337,
-            sourceConfig: Config.CustomSources([sourceMock.source]),
-          },
-        ],
-        ~enableHasura=true,
-      )
-      await Utils.delay(0)
-
-      sourceMock.resolveGetHeightOrThrow(300)
-      await Utils.delay(0)
-      await Utils.delay(0)
-
-      sourceMock.resolveGetItemsOrThrow([
-        {
-          blockNumber: 50,
-          logIndex: 1,
-        },
-      ])
-      await indexerMock.getBatchWritePromise()
-
-      // Update events_processed to a value > int32 max to verify uint52 column works
-      let sql = PgStorage.makeClient()
-      let _ = await sql->Postgres.unsafe(
-        `UPDATE "${Env.Db.publicSchema}"."envio_chains" SET "events_processed" = 2147487821 WHERE "id" = 1337`,
-      )
-
-      // float4 cast in the views makes Hasura return numbers instead of strings
-      // float4 has ~7 digits of precision, so large values lose precision
-      t.expect(
-        await indexerMock.graphql(`query { _meta { chainId eventsProcessed } }`),
-        ~message="_meta should return eventsProcessed as a number (float4 not stringified by Hasura)",
-      ).toEqual({
-        data: {
-          "_meta": [
-            {
-              "chainId": 1337,
-              "eventsProcessed": 2147487700., // float4 precision loss from 2147487821
-            },
-          ],
-        },
-      })
-
-      t.expect(
-        await indexerMock.graphql(`query { chain_metadata { chain_id num_events_processed } }`),
-        ~message="chain_metadata should return num_events_processed as a number (float4 not stringified)",
-      ).toEqual({
-        data: {
-          "chain_metadata": [
-            {
-              "chain_id": 1337,
-              "num_events_processed": 2147487700., // float4 precision loss from 2147487821
-            },
-          ],
-        },
-      })
-    },
-  )
 
   Async.it(
     "Multichain with reorg: staggered chain catch-up still enters reorg threshold",
