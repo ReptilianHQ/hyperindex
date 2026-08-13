@@ -1,8 +1,8 @@
 # Reptilian HyperIndex runtime
 
 This fork tracks Envio HyperIndex and publishes the Reptilian runtime as
-`@reptilianhq/envio`. Release `3.5.0-reptilian.1` is based on upstream
-`v3.5.0` and reuses the official `envio-*` native packages at version `3.5.0`.
+`@reptilianhq/envio`. The `3.6.1-reptilian.N` release line is based on upstream
+`v3.6.1` and reuses the official `envio-*` native packages at version `3.6.1`.
 
 The fork retains the application-specific runtime behavior that upstream does
 not provide:
@@ -12,6 +12,6 @@ not provide:
 - optional fixed-block source request pacing with finite-boundary handling; and
 - low-cardinality source, pipeline, PostgreSQL, and phase telemetry hooks.
 
-Publish only from a `v3.5.0-reptilian.N` tag after Build & Verify succeeds for
+Publish only from a `v3.6.1-reptilian.N` tag after Build & Verify succeeds for
 the tagged commit. The npm package is consumed through an alias so application
 imports and the CLI remain named `envio`.

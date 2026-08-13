@@ -3,11 +3,11 @@ name: Publish Reptilian Envio runtime
 on:
   push:
     tags:
-      - "v3.5.0-reptilian.*"
+      - "v3.6.1-reptilian.*"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  UPSTREAM_PLATFORM_VERSION: 3.5.0
+  UPSTREAM_PLATFORM_VERSION: 3.6.1
 
 permissions:
   actions: read
@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          if [[ ! "$version" =~ ^3\.5\.0-reptilian\.[0-9]+$ ]]; then
+          if [[ ! "$version" =~ ^3\.6\.1-reptilian\.[0-9]+$ ]]; then
             echo "Unsupported fork version: $version"
             exit 1
           fi
