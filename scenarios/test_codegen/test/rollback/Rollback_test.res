@@ -1020,8 +1020,8 @@ describe("E2E rollback tests", () => {
       ~message="Should rollback fetch coverage and re-request from block 103",
     ).toBe(true)
 
-    sourceMock.resolveGetItemsOrThrow([], ~resolveAt=#first, ~latestFetchedBlockNumber=104)
-    sourceMock.resolveGetItemsOrThrow([], ~resolveAt=#first, ~latestFetchedBlockNumber=104)
+    // Coalescing may represent both filters in a single rollback request.
+    sourceMock.resolveGetItemsOrThrow([], ~resolveAt=#all, ~latestFetchedBlockNumber=104)
     await Utils.delay(0)
     await Utils.delay(0)
     await Utils.delay(0)
