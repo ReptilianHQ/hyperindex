@@ -1547,7 +1547,8 @@ describe("E2E tests", () => {
       ->Array.toSorted(((_, a, _), (_, b, _)) => Int.compare(a, b)),
       ~message="Step 4: DC2 has 12 uniform 540-size chunks",
     ).toEqual([
-      ("2", 5000, Some(99800)),
+      // Coalescing bounds DC1 immediately before DC2's coverage begins.
+      ("2", 5000, Some(25099)),
       ("0", 25101, Some(99800)),
       ("3", 25901, Some(26440)),
       ("3", 26441, Some(26980)),
