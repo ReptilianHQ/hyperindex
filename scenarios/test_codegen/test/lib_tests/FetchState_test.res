@@ -4607,6 +4607,29 @@ describe("FetchState.getNextQuery target containment", () => {
     t.expect(emitted).toEqual([(1, Some(18)), (19, Some(36)), (37, Some(54))])
   })
 
+  it("does not let the historical fixed range delay realtime head updates", t => {
+    let partition = {
+      ...makePartition(~latestFetchedBlock=100, ~knownDensity=true),
+      sourceRangeCapacity: 100,
+      prevSourceRangeCapacity: 100,
+    }
+    let next = (~isRealtime) =>
+      switch makeFetchState(partition)->FetchState.getNextQuery(
+        ~chainTargetBlock=125,
+        ~chainTargetItems=10_000.,
+        ~isRealtime,
+        ~configuredSourceBlocksPerRequest=Some(100),
+      ) {
+      | Ready(queries) => queries->Array.map((q: FetchState.query) => (q.fromBlock, q.toBlock))
+      | NothingToQuery => []
+      | WaitingForNewBlock => [(-1, None)]
+      }
+    t.expect({"backfill": next(~isRealtime=false), "realtime": next(~isRealtime=true)}).toEqual({
+      "backfill": [],
+      "realtime": [(101, Some(125))],
+    })
+  })
+
   it("defers a gap past the target block, then fills it once the target reaches it", t => {
     // Gap [101, 199] sits between the fetched frontier (100) and a pending
     // chunk starting at 200.

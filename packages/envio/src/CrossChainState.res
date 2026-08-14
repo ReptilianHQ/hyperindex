@@ -368,7 +368,11 @@ let checkAndFetch = async (
         Some(cs->ChainState.blockAtProgress(~progress=progress +. 0.1))
       | _ => None
       }
-      switch cs->ChainState.getNextQuery(~chainTargetItems, ~maxTargetBlock?) {
+      switch cs->ChainState.getNextQuery(
+        ~chainTargetItems,
+        ~maxTargetBlock?,
+        ~isRealtime=crossChainState.isRealtime,
+      ) {
       | WaitingForNewBlock as action => actionByChain->ChainId.Dict.set(chainId, action)
       | NothingToQuery =>
         // A chain below its head can emit no query when its budget went to
