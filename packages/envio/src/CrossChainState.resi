@@ -10,6 +10,7 @@ let make: (
   ~isInReorgThreshold: bool,
   ~isRealtime: bool,
   ~targetBufferSize: int=?,
+  ~sourceBlocksPerRequest: option<int>=?,
 ) => t
 
 // Accessors.

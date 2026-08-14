@@ -94,6 +94,7 @@ let getNextQuery: (
   ~chainTargetItems: float,
   ~maxTargetBlock: int=?,
   ~isRealtime: bool=?,
+  ~sourceBlocksPerRequest: option<int>=?,
 ) => FetchState.nextQuery
 let dispatch: (
   t,
