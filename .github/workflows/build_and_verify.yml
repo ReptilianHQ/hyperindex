@@ -89,7 +89,8 @@ jobs:
       - name: Build linux-x64 platform npm package
         run: |
           node packages/build-envio/build-platform-package.ts \
-            --version "0.0.1-dev" --platform "linux" --arch "x64" --out "envio-linux-x64"
+            --version "0.0.1-dev" --platform "linux" --arch "x64" \
+            --scope reptilianhq --out "envio-linux-x64"
           mkdir -p envio-linux-x64
           cp target/release/libenvio.so envio-linux-x64/envio.node
 

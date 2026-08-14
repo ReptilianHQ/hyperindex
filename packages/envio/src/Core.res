@@ -151,10 +151,13 @@ let loadAddon = () => {
   // wrong name throws MODULE_NOT_FOUND immediately and the next candidate
   // wins. An empty list means the host isn't a publish target.
   let candidates = switch (processPlatform, processArch) {
-  | ("linux", "x64") => [`envio-linux-x64`, `envio-linux-x64-musl`]
-  | ("linux", "arm64") => [`envio-linux-arm64`]
-  | ("darwin", "x64") => [`envio-darwin-x64`]
-  | ("darwin", "arm64") => [`envio-darwin-arm64`]
+  | ("linux", "x64") => [
+      `@reptilianhq/envio-linux-x64`,
+      `@reptilianhq/envio-linux-x64-musl`,
+    ]
+  | ("linux", "arm64") => [`@reptilianhq/envio-linux-arm64`]
+  | ("darwin", "x64") => [`@reptilianhq/envio-darwin-x64`]
+  | ("darwin", "arm64") => [`@reptilianhq/envio-darwin-arm64`]
   | _ => []
   }
 
