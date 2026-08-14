@@ -85,7 +85,8 @@ jobs:
           libc_flag=""
           if [ -n "${LIBC}" ]; then libc_flag="--libc ${LIBC}"; fi
           node packages/build-envio/build-platform-package.ts \
-            --version "${VERSION}" --platform "${PLATFORM}" --arch "${ARCH}" ${libc_flag} --out "${node_pkg}"
+            --version "${VERSION}" --platform "${PLATFORM}" --arch "${ARCH}" \
+            --scope reptilianhq ${libc_flag} --out "${node_pkg}"
           # Copy the platform-specific cdylib as envio.node (matches package.json main)
           case "${PLATFORM}" in
             linux)  lib_name="libenvio.so" ;;

@@ -3,7 +3,7 @@
  * Generates a publish-ready package.json for a platform-specific binary package.
  *
  * Usage:
- *   node build-platform-package.ts --version <version> --platform <os> --arch <arch> --out <dir>
+ *   node build-platform-package.ts --version <version> --platform <os> --arch <arch> --scope <scope> --out <dir>
  */
 
 import { writeFileSync, copyFileSync, mkdirSync } from "node:fs";
@@ -19,6 +19,7 @@ const { values } = parseArgs({
     // the package name when "musl" and sets npm's `libc` field so npm/pnpm
     // picks the right optional dependency on the install host.
     libc: { type: "string" as const },
+    scope: { type: "string" as const },
     out: { type: "string" as const },
   },
   strict: true,
@@ -26,14 +27,15 @@ const { values } = parseArgs({
 
 if (!values.version || !values.platform || !values.arch || !values.out) {
   console.error(
-    "Usage: node build-platform-package.ts --version <v> --platform <os> --arch <arch> [--libc <glibc|musl>] --out <dir>"
+    "Usage: node build-platform-package.ts --version <v> --platform <os> --arch <arch> --scope <scope> [--libc <glibc|musl>] --out <dir>"
   );
   process.exit(1);
 }
 
-const { version, platform, arch, libc, out } = values;
-const name =
+const { version, platform, arch, libc, scope = "reptilianhq", out } = values;
+const unscopedName =
   libc === "musl" ? `envio-${platform}-${arch}-musl` : `envio-${platform}-${arch}`;
+const name = `@${scope}/${unscopedName}`;
 
 const pkg: Record<string, unknown> = {
   name,
