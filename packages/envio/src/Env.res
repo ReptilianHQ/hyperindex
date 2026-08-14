@@ -9,6 +9,7 @@ let maxAddrInPartition = envSafe->EnvSafe.get("MAX_PARTITION_SIZE", S.int, ~fall
 let maxPartitionConcurrency =
   envSafe->EnvSafe.get("ENVIO_MAX_PARTITION_CONCURRENCY", S.int->S.intMin(1), ~fallback=12)
 
+// Historical-only: realtime keeps Envio's adaptive partial-range behavior.
 let sourceBlocksPerRequest =
   envSafe->EnvSafe.get("ENVIO_SOURCE_BLOCKS_PER_REQUEST", S.option(S.int->S.intMin(1)))
 

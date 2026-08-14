@@ -41,6 +41,13 @@ let makePartition = (~id, ~contractName, ~registration, ~addresses): FetchState.
 }
 
 describe("Reptilian fetch planning", () => {
+  it("uses fixed source ranges only while backfilling", t => {
+    t.expect([
+      FetchState.getSourceBlocksPerRequest(~isRealtime=false, ~configured=Some(100)),
+      FetchState.getSourceBlocksPerRequest(~isRealtime=true, ~configured=Some(100)),
+    ]).toEqual([Some(100), None])
+  })
+
   it("coalesces compatible address-bound contract partitions", t => {
     let store = AddressStore.make(
       ~ecosystem=Ecosystem.Evm,

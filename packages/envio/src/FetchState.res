@@ -2268,6 +2268,9 @@ let walkPartitionPending = (
 // ~nothing, so an open-ended probe (full server scan range in one response)
 // beats a pipeline of hard-bounded chunks that crawl chunkRangeGrowthFactor×
 // per two responses.
+let getSourceBlocksPerRequest = (~isRealtime, ~configured) =>
+  isRealtime ? None : configured
+
 let pushForwardCandidates = (
   candidates: array<query>,
   // May be truncated to the chain's free concurrency slots — a pure generation
@@ -2280,6 +2283,7 @@ let pushForwardCandidates = (
   ~inRangeCount: int,
   ~chainTargetBlock: int,
   ~freshBudget: float,
+  ~sourceBlocksPerRequest,
 ) => {
   // Even share of the fresh budget across the partitions actually fetching
   // this tick (not every partition — so budget isn't stranded on ones below
@@ -2303,7 +2307,7 @@ let pushForwardCandidates = (
     | Some(eb) => eb
     | None => chainTargetBlock
     }
-    let chunkPlan = switch Env.sourceBlocksPerRequest {
+    let chunkPlan = switch sourceBlocksPerRequest {
     | Some(blocks) =>
       Some((blocks, p->getTrustedDensity->Option.getOr(Pervasives.max(1., rangeTargetDensity))))
     | None =>
@@ -2327,7 +2331,7 @@ let pushForwardCandidates = (
       | None => false
       }
       if (
-        Env.sourceBlocksPerRequest->Option.isSome &&
+        sourceBlocksPerRequest->Option.isSome &&
         availableBlocks < chunkSize &&
         !finalBoundaryReached
       ) {
@@ -2510,7 +2514,13 @@ let getNextQuery = (
   {optimizedPartitions, blockLag, latestOnBlockBlockNumber, knownHeight, endBlock}: t,
   ~chainTargetBlock: int,
   ~chainTargetItems: float,
+  ~isRealtime=false,
+  ~configuredSourceBlocksPerRequest=Env.sourceBlocksPerRequest,
 ) => {
+  let sourceBlocksPerRequest = getSourceBlocksPerRequest(
+    ~isRealtime,
+    ~configured=configuredSourceBlocksPerRequest,
+  )
   let headBlockNumber = knownHeight - blockLag
   if headBlockNumber <= 0 {
     WaitingForNewBlock
@@ -2670,6 +2680,7 @@ let getNextQuery = (
       ~inRangeCount,
       ~chainTargetBlock,
       ~freshBudget,
+      ~sourceBlocksPerRequest,
     )
 
     acceptCandidates(

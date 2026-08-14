@@ -604,7 +604,13 @@ let frontierProgress = (cs: t) =>
 // maxTargetBlock set to the most-behind chain's progress mapped onto this
 // chain, so a chain with budget can't run further ahead than the chain the
 // whole pool is prioritizing.
-let getNextQuery = (cs: t, ~chainTargetItems: float, ~maxTargetBlock=?) => {
+let getNextQuery = (
+  cs: t,
+  ~chainTargetItems: float,
+  ~maxTargetBlock=?,
+  ~isRealtime=false,
+  ~sourceBlocksPerRequest=Env.sourceBlocksPerRequest,
+) => {
   let chainTargetBlock = cs->targetBlock(~chainTargetItems)
   let chainTargetBlock = switch maxTargetBlock {
   | Some(maxTargetBlock) => Pervasives.min(chainTargetBlock, maxTargetBlock)
@@ -625,7 +631,12 @@ let getNextQuery = (cs: t, ~chainTargetItems: float, ~maxTargetBlock=?) => {
   // budget to the cold-chain cap, so it's used as-is.
   | _ => chainTargetItems
   }
-  cs.fetchState->FetchState.getNextQuery(~chainTargetBlock, ~chainTargetItems)
+  cs.fetchState->FetchState.getNextQuery(
+    ~chainTargetBlock,
+    ~chainTargetItems,
+    ~isRealtime,
+    ~configuredSourceBlocksPerRequest=sourceBlocksPerRequest,
+  )
 }
 
 // Run a fetch tick for this chain against its sources, feeding the owned fetch

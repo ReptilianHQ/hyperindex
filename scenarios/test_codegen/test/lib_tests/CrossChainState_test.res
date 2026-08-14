@@ -93,6 +93,8 @@ let makeFetchingChainState = (
   ~bufferBlocks=[],
   ~firstEventBlock=Some(0),
   ~blockLag=0,
+  ~sourceRangeCapacity=0,
+  ~eventDensity=None,
 ) => {
   let normalSelection = {FetchState.dependsOnAddresses: false, onEventRegistrations: []}
   let address = "0x1234567890123456789012345678901234567890"->Address.unsafeFromString
@@ -104,9 +106,9 @@ let makeFetchingChainState = (
     mergeBlock: None,
     dynamicContract: None,
     mutPendingQueries: [],
-    sourceRangeCapacity: 0,
-    prevSourceRangeCapacity: 0,
-    eventDensity: None,
+    sourceRangeCapacity,
+    prevSourceRangeCapacity: sourceRangeCapacity,
+    eventDensity,
     latestSourceRangeCapacityUpdateBlock: 0,
   }
   let addressStore = TestAddresses.makeStore(
@@ -165,12 +167,23 @@ let emptyBatch: Batch.t = {
   checkpointEventsProcessed: [],
 }
 
-let makeCrossChainState = (~chainStatesList, ~isRealtime=false, ~targetBufferSize=100) => {
+let makeCrossChainState = (
+  ~chainStatesList,
+  ~isRealtime=false,
+  ~targetBufferSize=100,
+  ~sourceBlocksPerRequest=?,
+) => {
   let chainStates = Dict.make()
   chainStatesList->Array.forEach(cs =>
     chainStates->ChainId.Dict.set((cs->ChainState.chainConfig).id, cs)
   )
-  CrossChainState.make(~chainStates, ~isInReorgThreshold=false, ~isRealtime, ~targetBufferSize)
+  CrossChainState.make(
+    ~chainStates,
+    ~isInReorgThreshold=false,
+    ~isRealtime,
+    ~targetBufferSize,
+    ~sourceBlocksPerRequest?,
+  )
 }
 
 let makeRegistration = (~contractName, ~index): Internal.onEventRegistration =>
@@ -846,6 +859,39 @@ describe("ChainState cold start", () => {
       dispatchedItemsByChain->Dict.get("2"),
       ~message="Chain 2 fetches its full 500-block range to head at density 10",
     ).toEqual(Some(5000))
+  })
+
+  Async.it("passes realtime mode through to fixed-range planning", async t => {
+    let ranges = async (~isRealtime) => {
+      let cs = makeFetchingChainState(
+        ~chainId=1->ChainId.fromInt,
+        ~knownHeight=125,
+        ~latestFetchedBlock=100,
+        ~sourceRangeCapacity=100,
+        ~eventDensity=Some(10.),
+      )
+      let cm = makeCrossChainState(
+        ~chainStatesList=[cs],
+        ~isRealtime,
+        ~targetBufferSize=10_000,
+        ~sourceBlocksPerRequest=Some(100),
+      )
+      let dispatched = ref([])
+      await cm->CrossChainState.checkAndFetch(~dispatchChain=(~chainId as _, ~action) => {
+        dispatched := switch action {
+        | Ready(queries) =>
+          queries->Array.map((q: FetchState.query) => (q.fromBlock, q.toBlock))
+        | WaitingForNewBlock | NothingToQuery => []
+        }
+        Promise.resolve()
+      })
+      dispatched.contents
+    }
+
+    t.expect({
+      "backfill": await ranges(~isRealtime=false),
+      "realtime": await ranges(~isRealtime=true),
+    }).toEqual({"backfill": [], "realtime": [(101, Some(125))]})
   })
 
   Async.it("gives a cold chain one 10% admission unit", async t => {
