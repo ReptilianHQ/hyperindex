@@ -721,8 +721,16 @@ let executeQuery = async (
   let toBlockRef = ref(query.toBlock)
   let responseRef = ref(None)
   let retryRef = ref(0)
+  // Hard cap: a query that retries past this limit has consumed all sources and
+  // all backoff windows. Throwing releases the concurrency reservation so
+  // getNextQuery can issue fresh queries rather than starving indefinitely.
+  // Without this cap the while loop spins forever, holding a reservation that
+  // availableConcurrency subtracts — blocking every other partition on the
+  // chain. Observed to deadlock at CHAIN_CONC=1 and cause silent partial
+  // indexing at CHAIN_CONC=8 (_v10 incident, dlmm-site#2087).
+  let maxRetries = 200
 
-  while responseRef.contents->Option.isNone {
+  while responseRef.contents->Option.isNone && retryRef.contents < maxRetries {
     // Select the best source at the start of every iteration
     let sourceState = switch sourceManager->getNextSource(
       ~isRealtime,
@@ -917,14 +925,28 @@ let executeQuery = async (
     }
   }
 
-  responseRef.contents->Option.getUnsafe
+  switch responseRef.contents {
+  | Some(response) => response
+  | None =>
+    let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
+    logger->Logging.childError({
+      "msg": `Block range query exceeded ${maxRetries->Int.toString} retries and did not resolve. Releasing concurrency reservation.`,
+      "fromBlock": query.fromBlock,
+      "toBlock": query.toBlock,
+      "partitionId": query.partitionId,
+    })
+    JsError.throwWithMessage(
+      `Block range query for partition ${query.partitionId} exceeded ${maxRetries->Int.toString} retries`,
+    )
+  }
 }
 
 let getBlockHashes = async (sourceManager: t, ~blockNumbers: array<int>, ~isRealtime: bool) => {
   let responseRef = ref(None)
   let retryRef = ref(0)
+  let maxRetries = 200
 
-  while responseRef.contents->Option.isNone {
+  while responseRef.contents->Option.isNone && retryRef.contents < maxRetries {
     let sourceState = switch sourceManager->getNextSource(~isRealtime) {
     | Some(s) => s
     | None =>
@@ -987,5 +1009,16 @@ let getBlockHashes = async (sourceManager: t, ~blockNumbers: array<int>, ~isReal
     }
   }
 
-  responseRef.contents->Option.getUnsafe
+  switch responseRef.contents {
+  | Some(response) => response
+  | None =>
+    let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
+    logger->Logging.childError({
+      "msg": `Block hash query exceeded ${maxRetries->Int.toString} retries and did not resolve. Releasing concurrency reservation.`,
+      "blockNumbers": blockNumbers,
+    })
+    JsError.throwWithMessage(
+      `Block hash query exceeded ${maxRetries->Int.toString} retries`,
+    )
+  }
 }

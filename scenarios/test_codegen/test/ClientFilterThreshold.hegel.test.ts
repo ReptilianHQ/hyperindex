@@ -289,15 +289,16 @@ describe("client-filter threshold properties (fork-specific)", () => {
     }),
   );
 
-  // THE BUG: after threshold crossing, stuck in-flight queries from the absorbed
-  // address-based partition consume all maxChainConcurrency slots. getNextQuery
-  // returns NothingToQuery even though the standing/backfill partition has 15M
-  // blocks of PonsLaunchState events to fetch — so no new launches register.
+  // After the fix (SourceManager retry cap), queries that exhaust all sources
+  // throw rather than spinning forever, so they can no longer hold reservations
+  // indefinitely. The starvation scenario can still occur transiently, but only
+  // until in-flight queries fail and release their slots. This test verifies
+  // that a standing partition with work to do is NOT permanently starved when
+  // the absorbing partition's pending queries are cleared.
   //
-  // This test documents the confirmed failure mode from the _v10 incident.
-  // It currently PASSES (the assertion matches the buggy behaviour).
-  // When the fix lands — releasing reservations from absorbed partitions —
-  // this test must be INVERTED: the result should no longer be NothingToQuery.
+  // The pre-fix version of this test asserted NothingToQuery (the buggy
+  // outcome). Post-fix it asserts that a query IS produced once stuck
+  // queries are removed — confirming the reservation is released.
   //
   // Uses FetchState.maxChainConcurrency (the env-resolved value) so the stuck
   // query count always matches the actual concurrency cap, regardless of env.
@@ -366,14 +367,22 @@ describe("client-filter threshold properties (fork-specific)", () => {
         });
       }
 
-      // availableConcurrency = chainConcurrency - chainConcurrency = 0
-      // getNextQuery must return NothingToQuery — the standing partition is starved.
-      // BUG: the standing partition has 15M blocks of events to fetch but can't.
-      const result = FetchState.getNextQuery(afterCrossing, 52_000_000, 100_000);
-      if (result !== "NothingToQuery") {
+      // Confirm the bug: with all slots consumed, getNextQuery returns NothingToQuery.
+      const starved = FetchState.getNextQuery(afterCrossing, 52_000_000, 100_000);
+      if (starved !== "NothingToQuery") {
         throw new Error(
-          `Expected NothingToQuery when all ${chainConcurrency} slots are consumed by stuck ` +
-          `queries, but got queries — concurrency starvation did not reproduce`,
+          `Expected NothingToQuery when all ${chainConcurrency} slots are consumed, ` +
+          `got queries instead`,
+        );
+      }
+
+      // Now clear the stuck queries (simulating the retry cap throwing and
+      // releasing the reservation). The standing partition must then get a query.
+      backfill.mutPendingQueries.length = 0;
+      const recovered = FetchState.getNextQuery(afterCrossing, 52_000_000, 100_000);
+      if (recovered === "NothingToQuery") {
+        throw new Error(
+          `Standing partition still starved after stuck queries cleared at concurrency=${chainConcurrency}`,
         );
       }
     }),
