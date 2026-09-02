@@ -204,10 +204,11 @@ describe("client-filter threshold properties (fork-specific)", () => {
 
   // Two contracts registering in lockstep (the exact _v10 shape) must both
   // appear in the standing partition's clientFilteredContracts after crossing.
+  // Cap concurrency at 8 (threshold ≤ 20,000) to keep address-batch creation fast.
   test(
     "lockstep two-contract crossing: both appear in standing clientFilteredContracts",
     () => hegel.test((tc) => {
-      const chainConcurrency = tc.draw(gs.integers({ minValue: 1, maxValue: 32 }));
+      const chainConcurrency = tc.draw(gs.integers({ minValue: 1, maxValue: 8 }));
       const regBlock = tc.draw(gs.integers({ minValue: 0, maxValue: 37_000_000 }));
       const threshold = thresholdFor(chainConcurrency);
 
@@ -283,6 +284,96 @@ describe("client-filter threshold properties (fork-specific)", () => {
         throw new Error(
           `Standing partition clientFilteredContracts must include both contracts at concurrency=${chainConcurrency}. ` +
             `Got: [${standingFiltered.join(", ")}]`,
+        );
+      }
+    }),
+  );
+
+  // THE BUG: after threshold crossing, stuck in-flight queries from the absorbed
+  // address-based partition consume all maxChainConcurrency slots. getNextQuery
+  // returns NothingToQuery even though the standing/backfill partition has 15M
+  // blocks of PonsLaunchState events to fetch — so no new launches register.
+  //
+  // This test documents the confirmed failure mode from the _v10 incident.
+  // It currently PASSES (the assertion matches the buggy behaviour).
+  // When the fix lands — releasing reservations from absorbed partitions —
+  // this test must be INVERTED: the result should no longer be NothingToQuery.
+  //
+  // Uses FetchState.maxChainConcurrency (the env-resolved value) so the stuck
+  // query count always matches the actual concurrency cap, regardless of env.
+  test(
+    "concurrency starvation: stuck queries from absorbed partition block standing partition (BUG)",
+    () => hegel.test((tc) => {
+      // The concurrency cap is fixed by env at test-runner startup — use the
+      // actual resolved value, not a drawn one, so the stuck query count matches.
+      const chainConcurrency: number = FetchState.maxChainConcurrency;
+      const threshold = thresholdFor(chainConcurrency);
+
+      const registrations = [
+        makeReg(1, "StaticContract", undefined, false),
+        makeReg(2, "PonsLaunchState", 0),
+      ];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+
+      // Static partition already at head.
+      const atHead = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        threshold,
+        52_000_000,
+        52_000_000,
+      );
+
+      // Cross the threshold: creates a standing partition (at 52M) and a backfill
+      // (from ~37M to 52M) that must fetch PonsLaunchState events.
+      const crossingBatch = Array.from({ length: threshold + 1 }, (_, i) => ({
+        address: hexAddress(i + 1),
+        contractName: "PonsLaunchState",
+        registrationBlock: 37_000_000 + i,
+      }));
+      const afterCrossing = FetchState.registerDynamicContracts(
+        atHead,
+        addressStore,
+        undefined,
+        crossingBatch,
+      );
+
+      const backfill = afterCrossing.optimizedPartitions.idsInAscOrder
+        .map((id: string) => afterCrossing.optimizedPartitions.entities[id])
+        .find((p: any) => !p.selection.dependsOnAddresses && p.mergeBlock !== undefined);
+
+      if (!backfill) {
+        // With static partition at 52M and dynamic at 37M there is always a backfill.
+        throw new Error(`No backfill partition at concurrency=${chainConcurrency}`);
+      }
+
+      // Simulate chainConcurrency stuck in-flight queries in the backfill partition
+      // (the _v10 scenario: queries from the absorbed address-based partition that
+      // entered SourceManager's unbounded retry loop and never returned).
+      for (let i = 0; i < chainConcurrency; i++) {
+        backfill.mutPendingQueries.push({
+          fromBlock: 37_000_000 + i * 1_000,
+          toBlock: 37_001_000 + i * 1_000,
+          isChunk: true,
+          itemsEst: 100,
+          itemsTarget: 100,
+          fetchedBlock: undefined, // stuck — never resolves
+        });
+      }
+
+      // availableConcurrency = chainConcurrency - chainConcurrency = 0
+      // getNextQuery must return NothingToQuery — the standing partition is starved.
+      // BUG: the standing partition has 15M blocks of events to fetch but can't.
+      const result = FetchState.getNextQuery(afterCrossing, 52_000_000, 100_000);
+      if (result !== "NothingToQuery") {
+        throw new Error(
+          `Expected NothingToQuery when all ${chainConcurrency} slots are consumed by stuck ` +
+          `queries, but got queries — concurrency starvation did not reproduce`,
         );
       }
     }),
