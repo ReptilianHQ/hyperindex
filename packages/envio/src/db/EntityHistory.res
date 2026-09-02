@@ -30,11 +30,20 @@ let unsafeCheckpointIdSchema =
     serializer: bigint => bigint->BigInt.toString,
   })
 
-let makeSetUpdateSchema = (~idSchema: S.t<EntityId.t>, entitySchema: S.t<'entity>): S.t<
-  Change.t<'entity>,
-> => {
+// `chainIdTag` carries the (column, chain id) of a per-chain entity whose rows
+// all belong to one chain: the column is then a constant of the schema rather
+// than a field read off every entity.
+let makeSetUpdateSchema = (
+  ~idSchema: S.t<EntityId.t>,
+  ~chainIdTag: option<(string, ChainId.t)>=?,
+  entitySchema: S.t<'entity>,
+): S.t<Change.t<'entity>> => {
   S.object(s => {
     s.tag(changeFieldName, RowAction.SET)
+    switch chainIdTag {
+    | Some((column, chainId)) => s.tag(column, chainId)
+    | None => ()
+    }
     Change.Set({
       checkpointId: s.field(checkpointIdFieldName, unsafeCheckpointIdSchema),
       entityId: s.field(Table.idFieldName, idSchema),
@@ -50,18 +59,14 @@ type pgEntityHistory<'entity> = {
   setChangeSchemaRows: S.t<array<Change.t<'entity>>>,
 }
 
-let maxPgTableNameLength = 63
 let historyTablePrefix = "envio_history_"
-let historyTableName = (~entityName, ~entityIndex) => {
-  let fullName = historyTablePrefix ++ entityName
-  if fullName->String.length > maxPgTableNameLength {
-    let entityIndexStr = entityIndex->Int.toString
-    fullName->Js.String.slice(~from=0, ~to_=maxPgTableNameLength - entityIndexStr->String.length) ++
-      entityIndexStr
-  } else {
-    fullName
-  }
-}
+// `$` can't occur in a GraphQL entity name, so it marks where a truncated name
+// stops and the index that keeps it unique begins. Without that boundary two
+// long names whose indexes differ in digit count can truncate onto the same
+// identifier, and `CREATE TABLE IF NOT EXISTS` would hand both entities one
+// history table.
+let historyTableName = (~entityName, ~entityIndex) =>
+  fitPgTableName(historyTablePrefix ++ entityName, ~uniqueSuffix=`$${entityIndex->Int.toString}`)
 
 type safeReorgBlocks = {
   chainIds: array<ChainId.t>,
@@ -136,7 +141,7 @@ let pruneStaleEntityHistory = (
 // If an entity doesn't have a history before the update
 // we create it automatically with envio_checkpoint_id 0
 // The ids belong to a single chain (the flush group's scope), so the chain is
-// bound once as $2 rather than unnested alongside them.
+// named once in the query rather than unnested alongside them.
 let makeBackfillHistoryQuery = (
   ~pgSchema,
   ~entityName,
@@ -146,8 +151,11 @@ let makeBackfillHistoryQuery = (
   ~chainId: option<ChainId.t>,
 ) => {
   let historyTableRef = `"${pgSchema}"."${historyTableName(~entityName, ~entityIndex)}"`
+  // Written into the SQL rather than bound: this scans the entity table, which
+  // is partitioned by the chain-id column, and Postgres can only prune a plan
+  // it caches when that column is a constant.
   let chainFilter = switch (chainIdColumn, chainId) {
-  | (Some(column), Some(_)) => ` AND e."${column}" = $2`
+  | (Some(column), Some(chainId)) => ` AND e."${column}" = ${chainId->ChainId.toString}`
   | _ => ""
   }
   `WITH target_ids AS (
@@ -174,13 +182,8 @@ let backfillHistory = (
   ~ids: array<EntityId.t>,
 ) => {
   let idPgType = table->Table.getIdPgFieldType(~pgSchema)
-  let chainIdColumn = table->Table.getChainIdField->Option.map(Table.getPgDbFieldName)
+  let chainIdColumn = table->Table.getPgChainIdColumn
   let params = [table->Table.encodeIdsToJson(ids)->(Utils.magic: JSON.t => unknown)]
-  switch (chainIdColumn, chainId) {
-  | (Some(_), Some(chainId)) =>
-    params->Array.push(chainId->(Utils.magic: ChainId.t => unknown))->ignore
-  | _ => ()
-  }
   sql
   ->Postgres.preparedUnsafe(
     makeBackfillHistoryQuery(
@@ -201,6 +204,8 @@ let rollback = (
   ~pgSchema,
   ~entityName,
   ~entityIndex,
+  ~chainIdColumn,
+  ~scope: RollbackScope.t,
   ~rollbackTargetCheckpointId: Internal.checkpointId,
 ) => {
   sql
@@ -208,8 +213,8 @@ let rollback = (
     `DELETE FROM "${pgSchema}"."${historyTableName(
         ~entityName,
         ~entityIndex,
-      )}" WHERE "${checkpointIdFieldName}" > $1;`,
-    [rollbackTargetCheckpointId->BigInt.toString]->(Utils.magic: array<string> => unknown),
+      )}" WHERE "${checkpointIdFieldName}" > $1${scope->RollbackScope.predicate(~chainIdColumn)};`,
+    scope->RollbackScope.params(~targetCheckpointId=rollbackTargetCheckpointId),
   )
   ->Utils.Promise.ignoreValue
 }

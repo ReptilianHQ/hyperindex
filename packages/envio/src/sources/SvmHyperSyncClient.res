@@ -4,7 +4,6 @@ type cfg = {
   /** Optional bearer token for the HyperSync server. */
   apiToken?: string,
   httpReqTimeoutMillis?: int,
-  maxNumRetries?: int,
   retryBaseMs?: int,
   retryCeilingMs?: int,
 }
@@ -28,14 +27,15 @@ module Registration = {
     // Earliest slot this registration accepts; `None` is unrestricted.
     startBlock: option<int>,
     discriminator?: string,
-    discriminatorByteLen: int,
     isInner?: bool,
-    includeLogs: bool,
     // DNF: outer array is OR of AND-groups.
     accountFilters: array<array<accountFilter>>,
     // camelCase Internal.svmTransactionField / svmBlockField names.
     transactionFields: array<string>,
     blockFields: array<string>,
+    accountActivityFields: array<string>,
+    logFields: array<string>,
+    instructionFields: array<string>,
     // Borsh schema pieces; empty accounts + absent argsJson = no schema.
     accounts: array<string>,
     argsJson?: string,
@@ -56,10 +56,8 @@ module Registration = {
         isWildcard: reg.isWildcard,
         startBlock: reg.startBlock,
         discriminator: ?eventConfig.discriminator,
-        discriminatorByteLen: eventConfig.discriminatorByteLen,
-        isInner: ?eventConfig.isInner,
-        includeLogs: eventConfig.includeLogs,
-        accountFilters: eventConfig.accountFilters->Array.map(group =>
+        isInner: ?reg.isInner,
+        accountFilters: reg.accountFilters->Array.map(group =>
           group->Array.map(
             (filter): accountFilter => {
               position: filter.position,
@@ -67,10 +65,11 @@ module Registration = {
             },
           )
         ),
-        transactionFields: eventConfig.selectedTransactionFields->Utils.Set.toArray,
-        blockFields: eventConfig.selectedBlockFields
-        ->(Utils.magic: Utils.Set.t<Internal.svmBlockField> => Utils.Set.t<string>)
-        ->Utils.Set.toArray,
+        transactionFields: reg.fieldSelection.transactionFields->Utils.Set.toArray,
+        blockFields: reg.fieldSelection.blockFields->Utils.Set.toArray,
+        accountActivityFields: reg.fieldSelection.accountActivityFields->Utils.Set.toArray,
+        logFields: reg.fieldSelection.logFields->Utils.Set.toArray,
+        instructionFields: reg.fieldSelection.instructionFields->Utils.Set.toArray,
         accounts: eventConfig.accounts,
         argsJson: ?switch eventConfig.args {
         | JSON.Null => None
@@ -84,102 +83,15 @@ module Registration = {
     })
 }
 
-module QueryTypes = {
-  type blockField =
-    | @as("slot") Slot
-    | @as("blockhash") Blockhash
-    | @as("parent_slot") ParentSlot
-    | @as("parent_blockhash") ParentBlockhash
-    | @as("block_time") BlockTime
-    | @as("block_height") BlockHeight
-
-  type transactionField =
-    | @as("slot") Slot
-    | @as("transaction_index") TransactionIndex
-    | @as("signatures") Signatures
-    | @as("fee_payer") FeePayer
-    | @as("success") Success
-    | @as("err") Err
-    | @as("fee") Fee
-    | @as("compute_units_consumed") ComputeUnitsConsumed
-    | @as("account_keys") AccountKeys
-    | @as("recent_blockhash") RecentBlockhash
-    | @as("version") Version
-    | @as("loaded_addresses_writable") LoadedAddressesWritable
-    | @as("loaded_addresses_readonly") LoadedAddressesReadonly
-
-  type fieldSelection = {block?: array<blockField>, transaction?: array<transactionField>}
-
-  /** Filter for selecting instructions. All non-empty fields are AND-ed: an
-   instruction must match at least one value in every non-empty field.
-
-   Discriminator filters (d1..d8) take hex-encoded byte prefixes ("0x" optional).
-   Account filters (a0..a9) take base58 pubkey strings. */
-  type instructionSelection = {
-    programId?: array<string>,
-    d1?: array<string>,
-    d2?: array<string>,
-    d4?: array<string>,
-    d8?: array<string>,
-    isInner?: bool,
-  }
-
-  // The `get` query surface, used only for block-data range queries; event
-  // fetching goes through `getEventItems`, which builds its query in Rust.
-  type query = {
-    fromSlot: int,
-    toSlot?: int,
-    instructions?: array<instructionSelection>,
-    includeAllBlocks?: bool,
-    fields?: fieldSelection,
-    maxNumBlocks?: int,
-    maxNumInstructions?: int,
-  }
-}
-
 module ResponseTypes = {
   // Lean per-slot header for reorg detection and each item's slot/time; the
   // selectable fields live in the block store and are materialised on demand.
   type block = {
     slot: int,
     blockhash: string,
-    blockTime?: int,
+    blockTime: Null.t<int>,
   }
 
-  /// Borsh-decoded view attached by the Rust client. `argsJson`/`accountsJson`
-  /// are stringified to side-step napi-rs's lack of native JSON passthrough.
-  type decodedInstruction = {
-    name: string,
-    argsJson: string,
-    accountsJson: string,
-    extraAccounts: array<string>,
-  }
-
-  type instruction = {
-    slot: int,
-    transactionIndex: int,
-    instructionAddress: array<int>,
-    programId: string,
-    accounts: array<string>,
-    data: string,
-    d1?: string,
-    d2?: string,
-    d4?: string,
-    d8?: string,
-    isInner: bool,
-    isCommitted: bool,
-  }
-
-  type queryResponseData = {
-    blocks: array<block>,
-    instructions: array<instruction>,
-  }
-
-  type queryResponse = {
-    nextSlot: int,
-    responseBytes: int,
-    data: queryResponseData,
-  }
 }
 
 module EventItems = {
@@ -200,9 +112,11 @@ module EventItems = {
     clientFilteredContracts: option<array<string>>,
   }
 
+  // NAPI encodes Rust `None` as `null`, never `undefined`, so an unselected
+  // key arrives as an explicit null rather than a missing field.
   type log = {
-    kind: string,
-    message: string,
+    kind: Null.t<string>,
+    message: Null.t<string>,
   }
 
   // One routed instruction; `block` and `transaction` are materialised from
@@ -211,18 +125,18 @@ module EventItems = {
     onEventRegistrationIndex: int,
     slot: int,
     transactionIndex: int,
-    instructionAddress: array<int>,
+    path: array<int>,
     programId: string,
     accounts: array<string>,
-    data: string,
-    d1?: string,
-    d2?: string,
-    d4?: string,
-    d8?: string,
+    data: Uint8Array.t,
     isInner: bool,
-    decoded?: ResponseTypes.decodedInstruction,
-    // Present only when the routed registration opted in via `includeLogs`.
-    logs?: array<log>,
+    // Borsh-decoded args as a JS value tree (wide integers as bigint), an
+    // empty object when the routed registration reads no args. An instruction
+    // the schema rejects is dropped in Rust, so a selected `args` is always
+    // decoded.
+    args: unknown,
+    // Non-null only when the routed registration selected `fields.log`.
+    logs: Null.t<array<log>>,
   }
 
   type response = {
@@ -236,13 +150,11 @@ module EventItems = {
   }
 }
 
-type query = QueryTypes.query
-type queryResponse = ResponseTypes.queryResponse
-
 type t = {
   getHeight: unit => promise<int>,
-  // Block-data range queries only; the store pages it returns are empty.
-  get: (~query: query) => promise<(queryResponse, TransactionStore.t, BlockStore.t)>,
+  // Block-hash query construction, pagination, and cursor-backed skipped-slot
+  // coverage live in Rust.
+  getBlockHashes: (~blockNumbers: array<int>) => promise<(BlockStore.t, array<RequestStat.t>)>,
   // Returns the routed items plus pages of raw transactions and blocks (kept
   // in Rust), keyed by (slot, transactionIndex) / slot, materialised at batch
   // prep.
@@ -265,7 +177,6 @@ let make = (
   ~url,
   ~apiToken=?,
   ~httpReqTimeoutMillis=?,
-  ~maxNumRetries=?,
   ~retryBaseMs=?,
   ~retryCeilingMs=?,
   ~eventRegistrations=[],
@@ -277,7 +188,6 @@ let make = (
       url,
       ?apiToken,
       ?httpReqTimeoutMillis,
-      ?maxNumRetries,
       ?retryBaseMs,
       ?retryCeilingMs,
     },

@@ -27,22 +27,25 @@ type initialChainState = {
   numEventsProcessed: float,
   firstEventBlockNumber: option<int>,
   timestampCaughtUpToHeadOrEndblock: option<Date.t>,
-  indexingAddresses: array<Internal.indexingAddress>,
+  // Every address the chain indexes, columnar — config-declared and dynamically
+  // registered alike. The chain's address store seeds straight from it.
+  addressRows: AddressRows.seedRows,
   sourceBlockNumber: int,
 }
 
 type initialState = {
   cleanRun: bool,
+  // On a resume this is what the database holds, not what the config would
+  // derive — the ids must never reshuffle under stored rows.
+  contractMapping: ContractMapping.t,
+  // Public config snapshot, restored with the address rows. None when
+  // envio_info or envio_contracts is missing.
+  envioInfo: option<JSON.t>,
   cache: dict<effectCacheRecord>,
   chains: array<initialChainState>,
   checkpointId: Internal.checkpointId,
   // Needed to keep reorg detection logic between restarts
   reorgCheckpoints: array<Internal.reorgCheckpoint>,
-  // Public config snapshot read from envio_info, used by `Persistence.init`
-  // to compat-check a resume against the running config. None when the
-  // schema pre-dates envio_info or the row is missing — `init` treats that
-  // as a version mismatch.
-  envioInfo: option<JSON.t>,
 }
 
 // Carries the already-resolved cache address (`table`) rather than an effect +
@@ -58,9 +61,19 @@ type updatedEffectCache = {
 type rollback = {
   targetCheckpointId: Internal.checkpointId,
   diffCheckpointId: Internal.checkpointId,
-  // Last valid block per chain affected by the rollback. Read by
-  // `RollbackCommit.fire` once the diff is durably written.
-  progressBlockNumberByChainId: dict<int>,
+  // How far the deletes reach. An isolated rollback must leave a sibling
+  // chain's rows alone, so the scope travels with the diff to the write.
+  scope: RollbackScope.t,
+  // The address registrations the rollback dropped, as the chains' address
+  // stores resolved them. Deleted by primary key in the same transaction.
+  rolledBackAddresses: array<AddressRows.key>,
+  // Where the rollback left every chain it moved. Written with the diff rather
+  // than waiting for a batch of those chains' own: the batch that carries the
+  // diff can belong to a chain the rollback never touched, and a chain whose
+  // stored progress outlived the checkpoints backing it would resume past
+  // blocks it never re-indexed. Also what `RollbackCommit.fire` reports once
+  // the diff is durably written.
+  progressedChains: array<InternalTable.Chains.progressedChain>,
 }
 
 // One flush group: the changes an entity accumulated within a single chain
@@ -92,6 +105,7 @@ type storage = {
     ~chainConfigs: array<Config.chain>=?,
     ~entities: array<Internal.entityConfig>=?,
     ~enums: array<Table.enumConfig<Table.enum>>=?,
+    ~contractMapping: ContractMapping.t,
     ~envioInfo: JSON.t,
   ) => promise<initialState>,
   resumeInitialState: unit => promise<initialState>,
@@ -139,6 +153,7 @@ type storage = {
   ) => promise<option<Internal.checkpointId>>,
   // Get rollback progress diff
   getRollbackProgressDiff: (
+    ~scope: RollbackScope.t,
     ~rollbackTargetCheckpointId: Internal.checkpointId,
   ) => promise<
     array<{
@@ -147,11 +162,14 @@ type storage = {
       "new_progress_block_number": int,
     }>,
   >,
-  // Get rollback data for entity
+  // Rollback data for an entity, as decoded entities rather than storage rows:
+  // only the storage knows how it encoded them, so each one decodes its own
+  // before handing them back.
   getRollbackData: (
     ~entityConfig: Internal.entityConfig,
+    ~scope: RollbackScope.t,
     ~rollbackTargetCheckpointId: Internal.checkpointId,
-  ) => promise<(array<rollbackRemoval>, array<unknown>)>,
+  ) => promise<(array<rollbackRemoval>, array<Internal.entity>)>,
   // Write batch to storage
   writeBatch: (
     ~batch: Batch.t,
@@ -161,6 +179,8 @@ type storage = {
     ~allEntities: array<Internal.entityConfig>,
     ~updatedEffectsCache: array<updatedEffectCache>,
     ~updatedEntities: array<updatedEntity>,
+    // Addresses this batch registered, with the checkpoint that covers them.
+    ~registeredAddresses: array<AddressRows.staged>,
     // Chain metadata stale since the last write, persisted in the same
     // transaction so it never races the batch write.
     ~chainMetaData: option<dict<InternalTable.Chains.metaFields>>,
@@ -194,7 +214,7 @@ let make = (
   ~allEnums,
   ~storage,
 ) => {
-  let allEntities = userEntities->Array.concat([InternalTable.EnvioAddresses.entityConfig])
+  let allEntities = userEntities
   let allEnums =
     allEnums->Array.concat([EntityHistory.RowAction.config->Table.fromGenericEnumConfig])
   {
@@ -207,7 +227,15 @@ let make = (
 }
 
 let init = {
-  async (persistence, ~chainConfigs, ~envioInfo, ~resetCommand, ~runCommand, ~reset=false) => {
+  async (
+    persistence,
+    ~chainConfigs,
+    ~contractMapping,
+    ~envioInfo,
+    ~resetCommand,
+    ~runCommand,
+    ~reset=false,
+  ) => {
     try {
       let shouldRun = switch persistence.storageStatus {
       | Unknown => true
@@ -229,6 +257,7 @@ let init = {
             ~entities=persistence.allEntities,
             ~enums=persistence.allEnums,
             ~chainConfigs,
+            ~contractMapping,
             ~envioInfo,
           )
           Logging.info(`The indexer storage is ready. Starting indexing!`)
@@ -243,17 +272,10 @@ let init = {
         ) {
           Logging.info(`Found existing indexer storage. Resuming indexing state...`)
           let initialState = await persistence.storage.resumeInitialState()
-          // Compat-check the running config against what was stored on the
-          // last successful initialize. None means the schema pre-dates
-          // envio_info (or the row was wiped out-of-band) and we can't
-          // compare — treat it as a version mismatch.
           let changedPaths = switch initialState.envioInfo {
-          | None => ["envio info is missing — storage initialized by an older envio"]
+          | None => ["storage was initialized by an older envio version"]
           | Some(stored) => Config.diffPaths(~stored, ~current=envioInfo)
           }
-          // `storage.clickhouse` is serialized as a plain bool by the
-          // public config (see Rust `StorageConfig`), so probe for
-          // `Boolean(true)`, not an object.
           let hasClickhouse = switch envioInfo {
           | Object(d) =>
             switch d->Dict.get("storage") {
@@ -267,6 +289,9 @@ let init = {
           | _ => false
           }
           Config.throwIfIncompatible(changedPaths, ~resetCommand, ~runCommand, ~hasClickhouse)
+          if !(initialState.contractMapping->ContractMapping.isEqual(contractMapping)) {
+            Config.throwIfIncompatible(["contracts"], ~resetCommand, ~runCommand, ~hasClickhouse)
+          }
           persistence.storageStatus = Ready(initialState)
           let progress = Dict.make()
           initialState.chains->Array.forEach(c => {

@@ -33,13 +33,19 @@ type sourceConfig =
   // A `simulate` run: the items the test fed in, parsed against the chain's
   // registrations. The source itself is built with the chain's address store,
   // like every other source, so it can apply the same gates.
-  | SimulateSourceConfig({items: array<Internal.item>, endBlock: int})
+  | SimulateSourceConfig({
+      items: array<Internal.item>,
+      endBlock: int,
+      transactionStore?: TransactionStore.t,
+      blockStore?: BlockStore.t,
+    })
   // For tests: pass custom sources directly
   | CustomSources(array<Source.t>)
 
 type chain = {
   name: string,
   id: ChainId.t,
+  ecosystem: Ecosystem.name,
   startBlock: int,
   endBlock?: int,
   maxReorgDepth: int,
@@ -101,6 +107,9 @@ type t = {
   // they can express fits an INTEGER.
   chainIdMode: ChainId.mode,
   chainMap: ChainMap.t<chain>,
+  // Derived from every chain's contracts, so an id means the same contract on
+  // every chain and on every restart.
+  contractMapping: ContractMapping.t,
   defaultChain: option<chain>,
   ecosystem: Ecosystem.t,
   enableRawEvents: bool,
@@ -117,73 +126,7 @@ type t = {
   isDev: bool,
   userEntitiesByName: dict<Internal.entityConfig>,
   userEntities: array<Internal.entityConfig>,
-  allEntities: array<Internal.entityConfig>,
   allEnums: array<Table.enumConfig<Table.enum>>,
-}
-
-module EnvioAddresses = {
-  let name = "envio_addresses"
-  let index = -1
-
-  let makeId = (~chainId: ChainId.t, ~address) => {
-    chainId->ChainId.toString ++ "-" ++ address->Address.toString
-  }
-
-  type t = {
-    id: string,
-    @as("chain_id") chainId: ChainId.t,
-    @as("registration_block") registrationBlock: int,
-    // Vestigial: always written as -1 and never read back. The column stays so
-    // an existing schema doesn't need a migration.
-    @as("registration_log_index") registrationLogIndex: int,
-    @as("contract_name") contractName: string,
-  }
-
-  // Extract the raw contract address from the composite id ({chainId}-{address}).
-  // Inverse of makeId. Keep in sync with makeId above and the SUBSTRING SQL in
-  // InternalTable.Chains.makeGetInitialStateQuery.
-  let getAddress = (entity: t): Address.t => {
-    let sepIdx = entity.id->String.indexOf("-")
-    entity.id
-    ->String.slice(~start=sepIdx + 1, ~end=entity.id->String.length)
-    ->Address.unsafeFromString
-  }
-
-  let schema = S.schema(s => {
-    id: s.matches(S.string),
-    chainId: s.matches(ChainId.schema),
-    registrationBlock: s.matches(S.int),
-    registrationLogIndex: s.matches(S.int),
-    contractName: s.matches(S.string),
-  })
-
-  let table = Table.mkTable(
-    name,
-    ~fields=[
-      Table.mkField("id", String, ~isPrimaryKey=true, ~fieldSchema=S.string),
-      Table.mkField("chain_id", ChainId, ~fieldSchema=ChainId.schema),
-      Table.mkField("registration_block", Int32, ~fieldSchema=S.int),
-      // -1 sentinel when registered from a block handler (no log index)
-      Table.mkField("registration_log_index", Int32, ~fieldSchema=S.int),
-      Table.mkField("contract_name", String, ~fieldSchema=S.string),
-    ],
-  )
-
-  external castToInternal: t => Internal.entity = "%identity"
-
-  let entityConfig = {
-    Internal.name,
-    index,
-    schema,
-    table,
-    // Internal address tracking is Postgres-only; the global config is
-    // always required to have Postgres enabled (Storage::resolve forbids
-    // a Postgres-disabled global), so this is safe regardless of mode.
-    storage: {postgres: true, clickhouse: false},
-    // The table already keys rows by chain through the composite `id`, so the
-    // per-chain mode must not append a second chain-id column to it.
-    crossChain: true,
-  }->Internal.fromGenericEntityConfig
 }
 
 type rpcSourceFor = | @as("sync") Sync | @as("fallback") Fallback | @as("realtime") Realtime
@@ -234,27 +177,6 @@ let publicConfigChainSchema = S.schema(s =>
 let svmEventDescriptorSchema = S.schema(s =>
   {
     "discriminator": s.matches(S.option(S.string)),
-    "discriminatorByteLen": s.matches(S.int),
-    "transactionFields": s.matches(S.array(Internal.svmTransactionFieldSchema)),
-    "blockFields": s.matches(S.option(S.array(Internal.svmBlockFieldSchema))),
-    "includeLogs": s.matches(S.bool),
-    // An array of AND-groups OR-ed together: the CLI normalizes both the flat
-    // and `any_of` YAML shapes to `Vec<Vec<SvmAccountFilterJson>>`.
-    "accountFilters": s.matches(
-      S.option(
-        S.array(
-          S.array(
-            S.schema(s =>
-              {
-                "position": s.matches(S.int),
-                "values": s.matches(S.array(S.string)),
-              }
-            ),
-          ),
-        ),
-      ),
-    ),
-    "isInner": s.matches(S.option(S.bool)),
     "accounts": s.matches(S.option(S.array(S.string))),
     "args": s.matches(S.option(S.json(~validate=false))),
   }
@@ -348,10 +270,18 @@ let propertySchema = S.schema(s =>
   }
 )
 
+let clickhouseSkippingIndexSchema: S.t<Internal.clickhouseSkippingIndex> = S.object(s => {
+  Internal.name: s.field("name", S.string),
+  expr: s.field("expr", S.string),
+  type_: s.field("type", S.string),
+  granularity: ?s.field("granularity", S.option(S.int)),
+})
+
 let clickhouseTableOptionsSchema: S.t<Internal.clickhouseTableOptions> = S.object(s => {
   Internal.partitionBy: ?s.field("partitionBy", S.option(S.string)),
   orderBy: ?s.field("orderBy", S.option(S.array(S.string))),
   ttl: ?s.field("ttl", S.option(S.string)),
+  skippingIndexes: ?s.field("skippingIndexes", S.option(S.array(clickhouseSkippingIndexSchema))),
 })
 
 // The entity's `clickhouse` storage arg mirrors the @storage directive:
@@ -377,6 +307,7 @@ let entityJsonSchema = S.schema(s =>
     "name": s.matches(S.string),
     "crossChain": s.matches(S.option(S.bool)),
     "storage": s.matches(S.option(entityStorageSchema)),
+    "internal": s.matches(S.option(S.bool)),
     "properties": s.matches(S.array(propertySchema)),
     "derivedFields": s.matches(S.option(S.array(derivedFieldSchema))),
     "compositeIndices": s.matches(S.option(S.array(S.array(compositeIndexFieldSchema)))),
@@ -431,7 +362,7 @@ let getFieldTypeAndSchema = (prop, ~enumConfigsByName: dict<Table.enumConfig<Tab
     baseSchema
   }
   let fieldSchema = if isNullable {
-    S.null(fieldSchema)->S.toUnknown
+    Utils.Schema.nullTolerant(fieldSchema)->S.toUnknown
   } else {
     fieldSchema
   }
@@ -580,6 +511,7 @@ let parseEntitiesFromJson = (
       table,
       storage,
       crossChain,
+      internal: entityJson["internal"]->Option.getOr(false),
     }->Internal.fromGenericEntityConfig
   })
 }
@@ -615,6 +547,14 @@ let publicConfigSchema = S.schema(s =>
     "entities": s.matches(S.option(S.array(entityJsonSchema))),
   }
 )
+
+let contractMappingOf = (~chainConfigs: array<chain>): ContractMapping.t => {
+  let names = []
+  chainConfigs->Array.forEach(chain =>
+    chain.contracts->Array.forEach(contract => names->Array.push(contract.name)->ignore)
+  )
+  ContractMapping.make(~names)
+}
 
 let fromPublic = (publicConfigJson: JSON.t) => {
   let maxAddrInPartition = Env.maxAddrInPartition
@@ -795,14 +735,6 @@ let fromPublic = (publicConfigJson: JSON.t) => {
               Utils.magic: _ => {
                 "svm": option<{
                   "discriminator": option<string>,
-                  "discriminatorByteLen": int,
-                  "transactionFields": array<Internal.svmTransactionField>,
-                  "blockFields": option<array<Internal.svmBlockField>>,
-                  "includeLogs": bool,
-                  "accountFilters": option<
-                    array<array<{"position": int, "values": array<string>}>>,
-                  >,
-                  "isInner": option<bool>,
                   "accounts": option<array<string>>,
                   "args": option<JSON.t>,
                 }>,
@@ -815,28 +747,11 @@ let fromPublic = (publicConfigJson: JSON.t) => {
               `SVM instruction ${contractName}.${eventName} is missing the "svm" descriptor in internal config`,
             )
           }
-          let accountFilters =
-            svm["accountFilters"]
-            ->Option.getOr([])
-            ->Array.map(group =>
-              group->Array.map(
-                af => {
-                  Internal.position: af["position"],
-                  values: af["values"]->SvmTypes.Pubkey.fromStringsUnsafe,
-                },
-              )
-            )
           (EventConfigBuilder.buildSvmInstructionEventConfig(
             ~contractName,
             ~instructionName=eventName,
             ~programId,
             ~discriminator=svm["discriminator"],
-            ~discriminatorByteLen=svm["discriminatorByteLen"],
-            ~transactionFields=svm["transactionFields"],
-            ~blockFields=?svm["blockFields"],
-            ~includeLogs=svm["includeLogs"],
-            ~accountFilters,
-            ~isInner=svm["isInner"],
             ~accounts=svm["accounts"]->Option.getOr([]),
             ~args=svm["args"]->Option.getOr(JSON.Null),
             ~definedTypes=svmDefinedTypes,
@@ -923,25 +838,24 @@ let fromPublic = (publicConfigJson: JSON.t) => {
           }
         })
 
-      // The same address under two contract definitions (or twice under one)
-      // would later violate the (chainId, address) primary key of
-      // envio_addresses with an opaque Postgres error — fail fast with the
-      // offending pair instead. parseAddress already canonicalizes casing
-      // (checksum or lowercase), so an exact match catches case variants too.
-      let contractNameByAddress = Dict.make()
+      // One address listed twice for the same contract would violate the
+      // (chainId, address, contract) primary key of envio_addresses with an
+      // opaque Postgres error — fail fast instead. Two contracts may share an
+      // address: each indexes it with its own events. parseAddress already
+      // canonicalizes casing (checksum or lowercase), so an exact match
+      // catches case variants too.
+      let seen = Utils.Set.make()
       contracts->Array.forEach(contract => {
         contract.addresses->Array.forEach(
           address => {
             let addressString = address->Address.toString
-            switch contractNameByAddress->Dict.get(addressString) {
-            | Some(existingContractName) =>
+            let key = contract.name ++ "-" ++ addressString
+            if seen->Utils.Set.has(key) {
               JsError.throwWithMessage(
-                existingContractName === contract.name
-                  ? `Address ${addressString} is listed multiple times for the contract ${contract.name} on chain ${chainId->ChainId.toString}. Please remove the duplicate from your config.`
-                  : `Address ${addressString} on chain ${chainId->ChainId.toString} is configured for multiple contracts: ${existingContractName} and ${contract.name}. Indexing the same address with multiple contract definitions is not supported. Please define the events on a single contract definition instead.`,
+                `Address ${addressString} is listed multiple times for the contract ${contract.name} on chain ${chainId->ChainId.toString}. Please remove the duplicate from your config.`,
               )
-            | None => contractNameByAddress->Dict.set(addressString, contract.name)
             }
+            seen->Utils.Set.add(key)->ignore
           },
         )
       })
@@ -1012,12 +926,20 @@ let fromPublic = (publicConfigJson: JSON.t) => {
       {
         name: chainName,
         id: chainId,
+        ecosystem: ecosystemName,
         startBlock: publicChainConfig["startBlock"],
         endBlock: ?publicChainConfig["endBlock"],
         maxReorgDepth: switch ecosystemName {
         | Ecosystem.Evm => publicChainConfig["maxReorgDepth"]->Option.getOr(200)
-
-        | Ecosystem.Fuel | Ecosystem.Svm => 0
+        // Tower BFT roots a block once 32 votes lock it in (MAX_LOCKOUT_HISTORY
+        // is 31, plus the slot itself), which is what `finalized` waits for — so
+        // 32 is the protocol's own bound on how far a fork can be replaced. That
+        // bound counts *blocks* while the threshold here is measured in slot
+        // numbers, and skipped slots make the slot distance the larger of the
+        // two, so the default keeps a wide margin over it. Slots are ~0.4s, so
+        // even this spans well under two minutes of chain.
+        | Ecosystem.Svm => publicChainConfig["maxReorgDepth"]->Option.getOr(200)
+        | Ecosystem.Fuel => 0
         },
         blockLag: publicChainConfig["blockLag"]->Option.getOr(0),
         contracts,
@@ -1059,8 +981,6 @@ let fromPublic = (publicConfigJson: JSON.t) => {
     ->Option.getOr([])
     ->parseEntitiesFromJson(~enumConfigsByName, ~globalStorage, ~defaultCrossChain)
 
-  let allEntities = userEntities->Array.concat([EnvioAddresses.entityConfig])
-
   // Keyed by the capitalized entity name to match the handler-context
   // accessor (`context.Pool_snapshots`) the generated types expose, while
   // entityConfig.name stays the original schema name used for the physical
@@ -1097,6 +1017,7 @@ let fromPublic = (publicConfigJson: JSON.t) => {
     storage: globalStorage,
     chainIdMode: publicConfig["chainIdMode"]->Option.getOr(Int32),
     chainMap,
+    contractMapping: contractMappingOf(~chainConfigs=chains),
     defaultChain: chains->Array.get(0),
     enableRawEvents: publicConfig["rawEvents"]->Option.getOr(false),
     ecosystem,
@@ -1108,10 +1029,17 @@ let fromPublic = (publicConfigJson: JSON.t) => {
     isDev: publicConfig["isDev"]->Option.getOr(false),
     userEntitiesByName,
     userEntities,
-    allEntities,
     allEnums,
   }
 }
+
+// With no cross-chain entity, a reorg on one chain can never have changed a row
+// another chain owns, so its rollback stays isolated to that chain instead of
+// dragging every sibling back with it. A single chain has no sibling to spare,
+// and narrowing its rollback would only buy it a predicate that always holds.
+let isIsolatedMultichain = (config: t) =>
+  config.chainMap->ChainMap.keys->Array.length > 1 &&
+    config.userEntities->Array.every(entityConfig => !entityConfig.crossChain)
 
 // Canonicalize a user-provided address to the configured casing so it matches
 // addresses parsed from config.yaml during routing. HyperSync/RPC data arrives

@@ -199,6 +199,13 @@ module Dict = {
     }
   `)
 
+  let clearInPlace: dict<'a> => unit = %raw(`(dict) => {
+      for (const key in dict) {
+        delete dict[key];
+      }
+    }
+  `)
+
   let unsafeDeleteUndefinedFieldsInPlace: 'a => unit = %raw(`(dict) => {
       for (var key in dict) {
         if (dict[key] === undefined) {
@@ -245,6 +252,10 @@ module Array = {
   include Array
 
   let immutableEmpty: array<unknown> = []
+
+  /** Render names for an error message: `"a", "b"`. */
+  let quotedJoin = (names: array<string>) =>
+    names->Array.map(name => `"${name}"`)->Array.joinUnsafe(", ")
 
   @send
   external forEachAsync: (array<'a>, 'a => promise<unit>) => unit = "forEach"
@@ -487,12 +498,39 @@ external queueMicrotask: (unit => unit) => unit = "queueMicrotask"
 module Schema = {
   let variantTag = S.union([S.string, S.object(s => s.field("TAG", S.string))])
 
+  // A ReScript `option` is `undefined` at runtime, so `S.null`'s serializer
+  // treats only `undefined` as the empty case — a genuine `null`, which a JS
+  // handler writes for a field it doesn't set, reaches the value serializer
+  // and crashes it (`null.toString()` for a BigInt column). Collapse both to
+  // `None` before the value serializer sees them.
+  //
+  // Revisit on the Sury v11 migration: if its nullable handles a `null` value
+  // on the serialize side, this wrapper goes away.
+  let nullTolerant = schema =>
+    S.null(schema)->S.transform(_ => {
+      parser: value => value,
+      serializer: value => value->(magic: option<'a> => Nullable.t<'a>)->Nullable.toOption,
+    })
+
   // Don't use S.unknown, since it's not serializable to json
   // In a nutshell, this is completely unsafe.
   let dbDate =
     S.json(~validate=false)
     ->(magic: S.t<JSON.t> => S.t<Date.t>)
     ->S.preprocess(_ => {serializer: date => date->magic->Date.toISOString})
+
+  // JSON `null` is a document, and Postgres stores it as one. Reaching the
+  // ClickHouse sink as a JS `null` it would instead read as a field the handler
+  // never set, which a String column has no way to hold — so it travels as the
+  // text it would have been serialized to. Every other document is left for the
+  // sink to serialize.
+  let clickHouseJson = S.json(~validate=false)->S.preprocess(_ => {
+    serializer: value =>
+      switch value->(magic: unknown => Nullable.t<unknown>)->Nullable.toOption {
+      | None => "null"->magic
+      | Some(json) => json
+      },
+  })
 
   // ClickHouse expects timestamps as numbers (milliseconds), not ISO strings
   let clickHouseDate =
@@ -575,6 +613,9 @@ module Set = {
 
   @send
   external intersection: (t<'value>, t<'value>) => t<'value> = "intersection"
+
+  @send
+  external union: (t<'value>, t<'value>) => t<'value> = "union"
 
   let immutableAdd: (t<'a>, 'a) => t<'a> = %raw(`(set, value) => {
     return new Set([...set, value])

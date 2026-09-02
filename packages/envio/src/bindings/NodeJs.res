@@ -66,6 +66,18 @@ module Process = {
   external getActiveResourcesInfo: unit => array<string> = "getActiveResourcesInfo"
 }
 
+module Buffer = {
+  type t
+  @val @scope("Buffer") external concat: array<t> => t = "concat"
+  @val @scope("Buffer") external alloc: int => t = "alloc"
+  @get external length: t => int = "length"
+  @send external toBase64: (t, @as("base64") _) => string = "toString"
+  @val @scope("Buffer") external fromUint8Array: Uint8Array.t => t = "from"
+  @val @scope("Buffer") external fromHex: (string, @as("hex") _) => t = "from"
+  @send external toHex: (t, @as("hex") _) => string = "toString"
+  let empty = alloc(0)
+}
+
 module V8 = {
   type heapSpaceStatistics = {
     @as("space_name") spaceName: string,
