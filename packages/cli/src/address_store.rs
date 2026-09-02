@@ -1627,3 +1627,143 @@ mod tests {
         );
     }
 }
+
+// Property tests for is_indexed_at — the chain-wide gate that SimulateSource's
+// isAddressAllowed uses for client-filtered contracts. The deterministic unit
+// tests above cover specific known shapes; these cover arbitrary inputs to
+// guard against regressions at the boundary that the _v10 incident exposed.
+//
+// https://github.com/ReptilianHQ/dlmm-site/issues/2087
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use hegel::generators as gs;
+    use hegel::TestCase;
+
+    fn evm_store_c() -> AddressStore {
+        AddressStore::new_evm(
+            false,
+            vec![AddressStoreContract {
+                name: "C".to_string(),
+                start_block: None,
+                depends_on_addresses: true,
+            }],
+        )
+    }
+
+    fn hex_address(n: u64) -> String {
+        format!("0x{:0>40x}", n)
+    }
+
+    // Once indexed, always indexed: is_indexed_at must be monotone in
+    // block_number. Any query block >= effective_start_block must return true.
+    #[hegel::test]
+    fn is_indexed_at_monotone_after_effective_start(tc: TestCase) {
+        let addr_seed = tc.draw(gs::integers::<u64>().min_value(1).max_value(u32::MAX as u64));
+        let reg_block = tc.draw(gs::integers::<i64>().min_value(0).max_value(10_000_000));
+        let query_delta = tc.draw(gs::integers::<i64>().min_value(0).max_value(50_000_000));
+
+        let store = evm_store_c();
+        let addr = hex_address(addr_seed);
+        let verdicts = store.register_seed(vec![AddressRegistration {
+            address: addr.clone(),
+            contract_name: "C".to_string(),
+            registration_block: reg_block,
+        }]);
+        assert_eq!(verdicts[0].kind, VERDICT_ADDED);
+        let effective = verdicts[0].effective_start_block;
+        let query_block = effective + query_delta;
+        assert!(
+            store.is_indexed_at(addr.clone(), "C".to_string(), query_block),
+            "is_indexed_at returned false at block {query_block} (effective_start_block={effective})",
+        );
+    }
+
+    // One block before effective_start_block must never return true.
+    #[hegel::test]
+    fn is_indexed_at_false_before_effective_start(tc: TestCase) {
+        let addr_seed = tc.draw(gs::integers::<u64>().min_value(1).max_value(u32::MAX as u64));
+        let reg_block = tc.draw(gs::integers::<i64>().min_value(1).max_value(10_000_000));
+
+        let store = evm_store_c();
+        let addr = hex_address(addr_seed);
+        let verdicts = store.register_seed(vec![AddressRegistration {
+            address: addr.clone(),
+            contract_name: "C".to_string(),
+            registration_block: reg_block,
+        }]);
+        assert_eq!(verdicts[0].kind, VERDICT_ADDED);
+        let effective = verdicts[0].effective_start_block;
+        if effective == 0 {
+            return; // nothing to test — block 0 is the earliest possible query
+        }
+        assert!(
+            !store.is_indexed_at(addr.clone(), "C".to_string(), effective - 1),
+            "is_indexed_at returned true one block before effective_start_block={effective}",
+        );
+    }
+
+    // Config addresses (registration_block == -1) must be indexed at every
+    // non-negative block — this is the factory-address case from _v10.
+    #[hegel::test]
+    fn config_address_indexed_at_any_block(tc: TestCase) {
+        let addr_seed = tc.draw(gs::integers::<u64>().min_value(1).max_value(u32::MAX as u64));
+        let query_block = tc.draw(gs::integers::<i64>().min_value(0).max_value(60_000_000));
+
+        let store = evm_store_c();
+        let addr = hex_address(addr_seed);
+        store.register_seed(vec![AddressRegistration {
+            address: addr.clone(),
+            contract_name: "C".to_string(),
+            registration_block: -1,
+        }]);
+        assert!(
+            store.is_indexed_at(addr.clone(), "C".to_string(), query_block),
+            "config address not indexed at block {query_block}",
+        );
+    }
+
+    // An unregistered address must never pass the gate, regardless of block.
+    #[hegel::test]
+    fn unregistered_address_never_indexed(tc: TestCase) {
+        let addr_seed = tc.draw(gs::integers::<u64>().min_value(1).max_value(u32::MAX as u64));
+        let query_block = tc.draw(gs::integers::<i64>().min_value(0).max_value(60_000_000));
+
+        let store = evm_store_c();
+        let addr = hex_address(addr_seed);
+        assert!(
+            !store.is_indexed_at(addr, "C".to_string(), query_block),
+            "unregistered address passed is_indexed_at at block {query_block}",
+        );
+    }
+
+    // After bulk registration at the _v10 threshold size (20,036 addresses),
+    // every address must still be indexed at its effective_start_block.
+    // Verifies no eviction or silent corruption under load.
+    #[hegel::test]
+    fn bulk_registration_all_indexed_at_effective_block(tc: TestCase) {
+        let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(500));
+        let base_block = tc.draw(gs::integers::<i64>().min_value(0).max_value(37_000_000));
+
+        let store = evm_store_c();
+        let registrations: Vec<_> = (1..=count as u64)
+            .map(|i| AddressRegistration {
+                address: hex_address(i),
+                contract_name: "C".to_string(),
+                registration_block: base_block + i as i64,
+            })
+            .collect();
+        let verdicts = store.register_seed(registrations.clone());
+        for (i, verdict) in verdicts.iter().enumerate() {
+            if verdict.kind != VERDICT_ADDED {
+                continue;
+            }
+            let addr = registrations[i].address.clone();
+            let effective = verdict.effective_start_block;
+            assert!(
+                store.is_indexed_at(addr.clone(), "C".to_string(), effective),
+                "address {addr} not indexed at effective_start_block={effective} after bulk registration",
+            );
+        }
+    }
+}
