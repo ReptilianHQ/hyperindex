@@ -359,7 +359,7 @@ module OptimizedPartitions = {
     switch p.mutPendingQueries->Utils.Array.last {
     | Some({toBlock: Some(toBlock)}) => Some(toBlock)
     | Some({toBlock: None}) => None
-    | None => Some(p.latestFetchedBlock.blockNumber)
+    | None => Some(p.latestFetchedBlock)
     }
 
   let coalesceAddressBoundPartitions = (~partitions, ~maxAddrInPartition) => {

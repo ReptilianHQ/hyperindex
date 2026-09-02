@@ -356,7 +356,7 @@ let processEventBatch = async (
       // Materialise store-backed transactions onto payloads before any handler
       // (preload or execute) reads them.
       await RuntimeHooks.tracePhase("materialize", () =>
-        materializeBatchEvents(batch, ~chainStates, ~ecosystem=config.ecosystem.name)
+        materializeBatchEvents(batch, ~chainStates)
       )
       await RuntimeHooks.tracePhase("preload", () =>
         batch->preloadBatchOrThrow(~loadManager, ~persistence, ~indexerState, ~chains, ~config)
