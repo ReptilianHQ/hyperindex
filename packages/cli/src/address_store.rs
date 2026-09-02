@@ -1746,19 +1746,22 @@ mod prop_tests {
         let base_block = tc.draw(gs::integers::<i64>().min_value(0).max_value(37_000_000));
 
         let store = evm_store_c();
-        let registrations: Vec<_> = (1..=count as u64)
-            .map(|i| AddressRegistration {
-                address: hex_address(i),
+        let addresses: Vec<String> = (1..=count as u64).map(hex_address).collect();
+        let registrations: Vec<_> = addresses
+            .iter()
+            .enumerate()
+            .map(|(i, addr)| AddressRegistration {
+                address: addr.clone(),
                 contract_name: "C".to_string(),
-                registration_block: base_block + i as i64,
+                registration_block: base_block + i as i64 + 1,
             })
             .collect();
-        let verdicts = store.register_seed(registrations.clone());
+        let verdicts = store.register_seed(registrations);
         for (i, verdict) in verdicts.iter().enumerate() {
             if verdict.kind != VERDICT_ADDED {
                 continue;
             }
-            let addr = registrations[i].address.clone();
+            let addr = addresses[i].clone();
             let effective = verdict.effective_start_block;
             assert!(
                 store.is_indexed_at(addr.clone(), "C".to_string(), effective),
