@@ -2352,6 +2352,7 @@ mod prop_tests {
                 depends_on_addresses: true,
             }],
         )
+        .expect("evm_store_c: failed to create AddressStore")
     }
 
     fn hex_address(n: u64) -> String {
