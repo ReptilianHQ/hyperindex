@@ -48,11 +48,7 @@ describe("RpcSource - name", () => {
 })
 
 describe("RpcSource - getHeightOrThrow", () => {
-<<<<<<< HEAD:scenarios/test_codegen/test/RpcSource_test.res
-  Async.it_skipIf(!hasLiveApiToken)("Returns the current height of the chain", async t => {
-=======
   Async.itWithOptions("Returns the current height of the chain", {retry: 3}, async t => {
->>>>>>> upstream/main:packages/envio-tests/test/RpcSource_test.res
     let source = RpcSource.make({
       url: `https://eth.rpc.hypersync.xyz/${testApiToken}`,
       chainId: 1337->ChainId.fromInt,
