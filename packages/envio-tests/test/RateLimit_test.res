@@ -45,6 +45,24 @@ let makeMockSource = (~rateLimitedCalls: int, ~resetMs: int): Source.t => {
 }
 
 describe("SourceManager.getBlockHashes rate limit handling", () => {
+  it("identifies the source query execution will use in each phase", t => {
+    let hyperSync = makeMockSource(~rateLimitedCalls=0, ~resetMs=100)
+    let realtimeRpc: Source.t = {
+      ...hyperSync,
+      name: "MockRealtimeRpc",
+      sourceFor: Realtime,
+      poweredByHyperSync: false,
+    }
+    let sourceManager = SourceManager.make(
+      ~sources=[hyperSync, realtimeRpc],
+      ~isRealtime=false,
+    )
+    t.expect({
+      "backfill": sourceManager->SourceManager.willQueryHyperSync(~isRealtime=false),
+      "realtime": sourceManager->SourceManager.willQueryHyperSync(~isRealtime=true),
+    }).toEqual({"backfill": true, "realtime": false})
+  })
+
   Async.it("recovers after a rate limit and tracks wait time", async t => {
     // 500ms resetMs * 2 rate-limited calls = ~1s minimum total wait
     let source = makeMockSource(~rateLimitedCalls=2, ~resetMs=500)

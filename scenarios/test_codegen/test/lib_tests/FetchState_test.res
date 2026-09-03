@@ -1936,6 +1936,41 @@ describe("FetchState.getNextQuery & integration", () => {
     t.expect(updatedFetchState->getNextQuery, ~message="Should wait for new block").toEqual(
       WaitingForNewBlock,
     )
+
+    let describeHeadAction = (
+      ~knownHeight,
+      ~isRealtime=true,
+      ~willQueryHyperSync=true,
+      ~endBlock=None,
+    ) => {
+      let state = {...updatedFetchState, knownHeight, endBlock}
+      switch state->FetchState.getNextQuery(
+        ~chainTargetBlock=knownHeight,
+        ~chainTargetItems=10_000.,
+        ~isRealtime,
+        ~hyperSyncHeadPollBlocks=25,
+        ~willQueryHyperSync,
+      ) {
+      | WaitingForNewBlock => "waiting"
+      | NothingToQuery => "nothing"
+      | Ready([query]) =>
+        `ready:${query.fromBlock->Int.toString}:${query.toBlock->Option.getOr(-1)->Int.toString}`
+      | Ready(_) => "ready:multiple"
+      }
+    }
+    t.expect({
+      "belowThreshold": describeHeadAction(~knownHeight=34),
+      "atThreshold": describeHeadAction(~knownHeight=35),
+      "backfill": describeHeadAction(~knownHeight=34, ~isRealtime=false),
+      "rpcRealtime": describeHeadAction(~knownHeight=34, ~willQueryHyperSync=false),
+      "finiteRealtime": describeHeadAction(~knownHeight=34, ~endBlock=Some(34)),
+    }).toEqual({
+      "belowThreshold": "waiting",
+      "atThreshold": "ready:11:-1",
+      "backfill": "ready:11:-1",
+      "rpcRealtime": "ready:11:-1",
+      "finiteRealtime": "ready:11:34",
+    })
     t.expect(
       updatedFetchState->getNextQuery(~chainTargetItems=0.),
       ~message="A zero admission budget must preserve WaitingForNewBlock",

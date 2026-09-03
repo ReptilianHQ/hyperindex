@@ -585,6 +585,14 @@ let getNextSource = (sourceManager, ~isRealtime, ~excludedSources=?) => {
   }
 }
 
+// Mirrors executeQuery's selection without mutating the active source, so the
+// planner never applies HyperSync pacing to realtime RPC or RPC failover.
+let willQueryHyperSync = (sourceManager: t, ~isRealtime) =>
+  switch sourceManager->getNextSource(~isRealtime) {
+  | Some(sourceState) => sourceState.source.poweredByHyperSync
+  | None => false
+  }
+
 // Polls for a block height greater than the given block number to ensure a new block is available for indexing.
 let waitForNewBlock = async (sourceManager: t, ~knownHeight, ~isRealtime, ~reducedPolling) => {
   let {sourcesState} = sourceManager
