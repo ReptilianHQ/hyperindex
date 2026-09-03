@@ -2445,12 +2445,17 @@ let makeSchedulerPartitionSnapshot = (partitionId, p: partition) => {
 // partitions have staggered frontiers: sorting every generated chunk only by
 // fromBlock lets a handful of lagging partitions fill the entire chain
 // concurrency cap and indefinitely delay dynamic-address partitions.
-let selectFairCandidates = (~candidates: array<query>, ~availableConcurrency: int) => {
+let selectFairCandidates = (
+  ~candidates: array<query>,
+  ~availableConcurrency: int,
+  ~inFlightCountByPartition: dict<int>,
+) => {
   let nextRoundByPartition = Dict.make()
   let ranked = candidates->Array.map(query => {
     let round = nextRoundByPartition->Dict.get(query.partitionId)->Option.getOr(0)
     nextRoundByPartition->Dict.set(query.partitionId, round + 1)
-    (round, query)
+    let ownedSlots = inFlightCountByPartition->Dict.get(query.partitionId)->Option.getOr(0)
+    (ownedSlots + round, query)
   })
   ranked->Array.sort(((aRound, a), (bRound, b)) =>
     if aRound !== bRound {
@@ -2600,6 +2605,7 @@ let getNextQuery = (
     // lingers in mutPendingQueries behind an unfilled gap, so counting it would
     // understate the budget and hold a concurrency slot it no longer uses.
     let inFlightCounts = Utils.Array.jsArrayCreate(partitionsCount)
+    let inFlightCountByPartition = Dict.make()
     // (fromBlock, itemsEst) of each still-in-flight query. The acceptance pass
     // merges these into the candidate stream and draws them down in fromBlock
     // order, so a gap-fill sitting before an in-flight query claims budget ahead
@@ -2625,6 +2631,7 @@ let getNextQuery = (
         }
       }
       inFlightCounts->Array.setUnsafe(idx, inFlightCount.contents)
+      inFlightCountByPartition->Dict.set(partitionId, inFlightCount.contents)
       if (
         p.mutPendingQueries->Array.length > 0 || p.latestFetchedBlock.blockNumber < headBlockNumber
       ) {
@@ -2722,7 +2729,13 @@ let getNextQuery = (
     // generation bound: sizing still divides by the full inRangeCount, so each
     // probe keeps its honest per-partition share of the budget.
     let inRangeStates = if inRangeCount > availableConcurrency {
-      inRangeStates->Array.sort((a, b) => Int.compare(a.cursor, b.cursor))
+      inRangeStates->Array.sort((a, b) =>
+        if a.inFlightCount !== b.inFlightCount {
+          Int.compare(a.inFlightCount, b.inFlightCount)
+        } else {
+          Int.compare(a.cursor, b.cursor)
+        }
+      )
       inRangeStates->Array.slice(~start=0, ~end=availableConcurrency)
     } else {
       inRangeStates
@@ -2736,7 +2749,11 @@ let getNextQuery = (
       ~sourceBlocksPerRequest,
     )
 
-    let selectedCandidates = selectFairCandidates(~candidates, ~availableConcurrency)
+    let selectedCandidates = selectFairCandidates(
+      ~candidates,
+      ~availableConcurrency,
+      ~inFlightCountByPartition,
+    )
 
     acceptCandidates(
       ~candidates=selectedCandidates,

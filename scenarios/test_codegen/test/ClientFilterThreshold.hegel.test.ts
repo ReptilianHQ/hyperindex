@@ -129,6 +129,75 @@ describe("client-filter threshold properties (fork-specific)", () => {
     }),
   );
 
+  test(
+    "the last free slot goes to a partition with no existing reservations",
+    () => hegel.test((tc) => {
+      const baseBlock = tc.draw(gs.integers({ minValue: 0, maxValue: 10_000 }));
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        100_000,
+        baseBlock,
+      );
+      const reservedSlots = FetchState.maxChainConcurrency - 1;
+      const oldPartitionCount = Math.ceil(
+        reservedSlots / FetchState.maxInFlightChunksPerPartition,
+      );
+      const newcomerId = `${oldPartitionCount}`;
+      const ids = Array.from({ length: oldPartitionCount + 1 }, (_, index) => `${index}`);
+      let remainingReservations = reservedSlots;
+      const entities = Object.fromEntries(ids.map((id, index) => {
+        const frontier = baseBlock + index * 1_000;
+        const inFlight = id === newcomerId
+          ? 0
+          : Math.min(remainingReservations, FetchState.maxInFlightChunksPerPartition);
+        remainingReservations -= inFlight;
+        return [id, {
+          id,
+          latestFetchedBlock: { blockNumber: frontier, blockTimestamp: 0 },
+          selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+          addresses: addressStore.emptySet,
+          mergeBlock: undefined,
+          dynamicContract: undefined,
+          mutPendingQueries: Array.from({ length: inFlight }, (_, queryIndex) => ({
+            fromBlock: frontier + queryIndex * 10 + 1,
+            toBlock: frontier + (queryIndex + 1) * 10,
+            isChunk: true,
+            itemsTarget: undefined,
+            itemsEst: 1,
+            fetchedBlock: undefined,
+          })),
+          sourceRangeCapacity: 10,
+          prevSourceRangeCapacity: 10,
+          eventDensity: 1,
+          latestSourceRangeCapacityUpdateBlock: 0,
+        }];
+      }));
+      fetchState.optimizedPartitions = {
+        idsInAscOrder: ids,
+        entities,
+        maxAddrInPartition: MAX_ADDR_IN_PARTITION,
+        nextPartitionIndex: ids.length,
+        dynamicContracts: new Set(),
+        clientFilteredContracts: new Set(),
+      };
+
+      const action = FetchState.getNextQuery(fetchState, 100_000, 1_000_000);
+      expect(action).toMatchObject({
+        TAG: "Ready",
+        _0: [{ partitionId: newcomerId }],
+      });
+    }),
+  );
+
   // https://github.com/ReptilianHQ/dlmm-site/issues/2087
   test(
     "scheduler telemetry accounts for every retained query",
