@@ -2438,6 +2438,32 @@ let makeSchedulerPartitionSnapshot = (partitionId, p: partition) => {
   snapshot
 }
 
+// Select fresh work in partition-fair rounds before the block-ordered budget
+// pass. A partition's second chunk must not occupy a chain slot while another
+// runnable partition has not received its first. Within a round the oldest
+// cursor still wins, preserving the frontier-first policy. This matters when
+// partitions have staggered frontiers: sorting every generated chunk only by
+// fromBlock lets a handful of lagging partitions fill the entire chain
+// concurrency cap and indefinitely delay dynamic-address partitions.
+let selectFairCandidates = (~candidates: array<query>, ~availableConcurrency: int) => {
+  let nextRoundByPartition = Dict.make()
+  let ranked = candidates->Array.map(query => {
+    let round = nextRoundByPartition->Dict.get(query.partitionId)->Option.getOr(0)
+    nextRoundByPartition->Dict.set(query.partitionId, round + 1)
+    (round, query)
+  })
+  ranked->Array.sort(((aRound, a), (bRound, b)) =>
+    if aRound !== bRound {
+      Int.compare(aRound, bRound)
+    } else {
+      Int.compare(a.fromBlock, b.fromBlock)
+    }
+  )
+  ranked
+  ->Array.slice(~start=0, ~end=Pervasives.max(0, availableConcurrency))
+  ->Array.map(((_, query)) => query)
+}
+
 // Acceptance: merge fresh candidates (Some) with the in-flight reservations
 // (None) and walk them in fromBlock order, starting from the full
 // chainTargetItems. A reservation just draws down the budget — its query is
@@ -2519,10 +2545,12 @@ let acceptCandidates = (
 // fromBlock and accepted in that order while the budget stays positive. The
 // query that tips it negative is still accepted (a single overshoot);
 // everything after it waits for a tick with more budget.
-// Sorting by fromBlock spends the budget on the earliest blocks across all
-// partitions first, so no partition is starved by generation order and the
-// frontier advances evenly. In-flight reservations release as responses land,
-// so acceptance redistributes across ticks.
+// Fresh candidates are first selected in partition-fair rounds, oldest cursor
+// first within each round. The selected work is then budgeted in fromBlock
+// order alongside in-flight reservations. This keeps the frontier preference
+// without letting one partition's deeper pipeline consume every chain slot.
+// In-flight reservations release as responses land, so acceptance redistributes
+// across ticks.
 //
 // A partition with source-capacity history and a positive density generates
 // density-sized chunks toward the target. Any other partition (no signal, no
@@ -2642,11 +2670,9 @@ let getNextQuery = (
 
     // Every candidate query for this tick — gap-fill holes plus each in-range
     // partition's chunks/probe toward the target — generated with no budget
-    // check, then merged with the in-flight reservations, sorted by fromBlock,
-    // and accepted while the budget lasts (acceptCandidates). Selecting by
-    // fromBlock spends the budget on the earliest blocks across all partitions
-    // first, so no partition is starved by iteration order and the frontier
-    // advances evenly.
+    // check, selected in one-candidate-per-partition rounds, then merged with
+    // the in-flight reservations and accepted while the budget lasts
+    // (acceptCandidates). Within each fair round the oldest cursor wins.
     let candidates = []
 
     // Each partition's equal-divide share of the tick's budget, used to price
@@ -2710,8 +2736,10 @@ let getNextQuery = (
       ~sourceBlocksPerRequest,
     )
 
+    let selectedCandidates = selectFairCandidates(~candidates, ~availableConcurrency)
+
     acceptCandidates(
-      ~candidates,
+      ~candidates=selectedCandidates,
       ~reservations,
       ~chainTargetItems,
       ~partitionIndexById,

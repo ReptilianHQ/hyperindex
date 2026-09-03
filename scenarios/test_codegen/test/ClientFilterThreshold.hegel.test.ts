@@ -74,6 +74,61 @@ const makeFetchState = (
   );
 
 describe("client-filter threshold properties (fork-specific)", () => {
+  test(
+    "a saturated scheduler gives every runnable partition a first slot before any gets another",
+    () => hegel.test((tc) => {
+      const extraPartitions = tc.draw(gs.integers({ minValue: 1, maxValue: 12 }));
+      const partitionCount = FetchState.maxChainConcurrency + extraPartitions;
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        100_000,
+        0,
+      );
+      const ids = Array.from({ length: partitionCount }, (_, index) => `${index}`);
+      const entities = Object.fromEntries(ids.map((id, index) => [id, {
+        id,
+        latestFetchedBlock: { blockNumber: index * 100, blockTimestamp: 0 },
+        selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+        addresses: addressStore.emptySet,
+        mergeBlock: undefined,
+        dynamicContract: undefined,
+        mutPendingQueries: [],
+        sourceRangeCapacity: 10,
+        prevSourceRangeCapacity: 10,
+        eventDensity: 1,
+        latestSourceRangeCapacityUpdateBlock: 0,
+      }]));
+      fetchState.optimizedPartitions = {
+        idsInAscOrder: ids,
+        entities,
+        maxAddrInPartition: MAX_ADDR_IN_PARTITION,
+        nextPartitionIndex: partitionCount,
+        dynamicContracts: new Set(),
+        clientFilteredContracts: new Set(),
+      };
+
+      const action = FetchState.getNextQuery(fetchState, 100_000, 1_000_000);
+      if (action?.TAG !== "Ready") {
+        throw new Error(`Expected Ready, got ${String(action)}`);
+      }
+      const queries = action._0;
+      const distinctPartitions = new Set(queries.map((query: any) => query.partitionId));
+      expect({ queries: queries.length, distinctPartitions: distinctPartitions.size }).toEqual({
+        queries: FetchState.maxChainConcurrency,
+        distinctPartitions: FetchState.maxChainConcurrency,
+      });
+    }),
+  );
+
   // https://github.com/ReptilianHQ/dlmm-site/issues/2087
   test(
     "scheduler telemetry accounts for every retained query",
