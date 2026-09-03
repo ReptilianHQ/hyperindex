@@ -2438,6 +2438,54 @@ let makeSchedulerPartitionSnapshot = (partitionId, p: partition) => {
   snapshot
 }
 
+// Select fresh work in partition-fair rounds before the block-ordered budget
+// pass. A partition's second chunk must not occupy a chain slot while another
+// runnable partition has not received its first. Within a round the oldest
+// cursor still wins, preserving the frontier-first policy. This matters when
+// partitions have staggered frontiers: sorting every generated chunk only by
+// fromBlock lets a handful of lagging partitions fill the entire chain
+// concurrency cap and indefinitely delay dynamic-address partitions.
+let selectFairCandidates = (
+  ~candidates: array<query>,
+  ~availableConcurrency: int,
+  ~inFlightCountByPartition: dict<int>,
+) => {
+  // A gap-fill repairs range that an existing reservation depends on. Keep the
+  // oldest repairs ahead of ordinary fairness so acceptCandidates can place
+  // them before the later reservation in its block-ordered budget stream. If
+  // fairness sliced them away first, a fully reserved budget could deadlock
+  // even though the chain still had a free concurrency slot.
+  let gapCandidates = candidates->Array.filter(query => query.rangeReason === "gap_fill")
+  gapCandidates->Array.sort((a, b) => Int.compare(a.fromBlock, b.fromBlock))
+  let selectedGapCandidates = gapCandidates->Array.slice(
+    ~start=0,
+    ~end=Pervasives.max(0, availableConcurrency),
+  )
+  let remainingConcurrency = availableConcurrency - selectedGapCandidates->Array.length
+
+  let nextRoundByPartition = Dict.make()
+  let ranked = candidates
+  ->Array.filter(query => query.rangeReason !== "gap_fill")
+  ->Array.map(query => {
+    let round = nextRoundByPartition->Dict.get(query.partitionId)->Option.getOr(0)
+    nextRoundByPartition->Dict.set(query.partitionId, round + 1)
+    let ownedSlots = inFlightCountByPartition->Dict.get(query.partitionId)->Option.getOr(0)
+    (ownedSlots + round, query)
+  })
+  ranked->Array.sort(((aRound, a), (bRound, b)) =>
+    if aRound !== bRound {
+      Int.compare(aRound, bRound)
+    } else {
+      Int.compare(a.fromBlock, b.fromBlock)
+    }
+  )
+  selectedGapCandidates->Array.concat(
+    ranked
+    ->Array.slice(~start=0, ~end=Pervasives.max(0, remainingConcurrency))
+    ->Array.map(((_, query)) => query),
+  )
+}
+
 // Acceptance: merge fresh candidates (Some) with the in-flight reservations
 // (None) and walk them in fromBlock order, starting from the full
 // chainTargetItems. A reservation just draws down the budget — its query is
@@ -2519,10 +2567,12 @@ let acceptCandidates = (
 // fromBlock and accepted in that order while the budget stays positive. The
 // query that tips it negative is still accepted (a single overshoot);
 // everything after it waits for a tick with more budget.
-// Sorting by fromBlock spends the budget on the earliest blocks across all
-// partitions first, so no partition is starved by generation order and the
-// frontier advances evenly. In-flight reservations release as responses land,
-// so acceptance redistributes across ticks.
+// Fresh candidates are first selected in partition-fair rounds, oldest cursor
+// first within each round. The selected work is then budgeted in fromBlock
+// order alongside in-flight reservations. This keeps the frontier preference
+// without letting one partition's deeper pipeline consume every chain slot.
+// In-flight reservations release as responses land, so acceptance redistributes
+// across ticks.
 //
 // A partition with source-capacity history and a positive density generates
 // density-sized chunks toward the target. Any other partition (no signal, no
@@ -2572,6 +2622,7 @@ let getNextQuery = (
     // lingers in mutPendingQueries behind an unfilled gap, so counting it would
     // understate the budget and hold a concurrency slot it no longer uses.
     let inFlightCounts = Utils.Array.jsArrayCreate(partitionsCount)
+    let inFlightCountByPartition = Dict.make()
     // (fromBlock, itemsEst) of each still-in-flight query. The acceptance pass
     // merges these into the candidate stream and draws them down in fromBlock
     // order, so a gap-fill sitting before an in-flight query claims budget ahead
@@ -2597,6 +2648,7 @@ let getNextQuery = (
         }
       }
       inFlightCounts->Array.setUnsafe(idx, inFlightCount.contents)
+      inFlightCountByPartition->Dict.set(partitionId, inFlightCount.contents)
       if (
         p.mutPendingQueries->Array.length > 0 || p.latestFetchedBlock.blockNumber < headBlockNumber
       ) {
@@ -2642,11 +2694,9 @@ let getNextQuery = (
 
     // Every candidate query for this tick — gap-fill holes plus each in-range
     // partition's chunks/probe toward the target — generated with no budget
-    // check, then merged with the in-flight reservations, sorted by fromBlock,
-    // and accepted while the budget lasts (acceptCandidates). Selecting by
-    // fromBlock spends the budget on the earliest blocks across all partitions
-    // first, so no partition is starved by iteration order and the frontier
-    // advances evenly.
+    // check, selected in one-candidate-per-partition rounds, then merged with
+    // the in-flight reservations and accepted while the budget lasts
+    // (acceptCandidates). Within each fair round the oldest cursor wins.
     let candidates = []
 
     // Each partition's equal-divide share of the tick's budget, used to price
@@ -2696,7 +2746,13 @@ let getNextQuery = (
     // generation bound: sizing still divides by the full inRangeCount, so each
     // probe keeps its honest per-partition share of the budget.
     let inRangeStates = if inRangeCount > availableConcurrency {
-      inRangeStates->Array.sort((a, b) => Int.compare(a.cursor, b.cursor))
+      inRangeStates->Array.sort((a, b) =>
+        if a.inFlightCount !== b.inFlightCount {
+          Int.compare(a.inFlightCount, b.inFlightCount)
+        } else {
+          Int.compare(a.cursor, b.cursor)
+        }
+      )
       inRangeStates->Array.slice(~start=0, ~end=availableConcurrency)
     } else {
       inRangeStates
@@ -2710,8 +2766,14 @@ let getNextQuery = (
       ~sourceBlocksPerRequest,
     )
 
-    acceptCandidates(
+    let selectedCandidates = selectFairCandidates(
       ~candidates,
+      ~availableConcurrency,
+      ~inFlightCountByPartition,
+    )
+
+    acceptCandidates(
+      ~candidates=selectedCandidates,
       ~reservations,
       ~chainTargetItems,
       ~partitionIndexById,

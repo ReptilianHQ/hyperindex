@@ -74,6 +74,206 @@ const makeFetchState = (
   );
 
 describe("client-filter threshold properties (fork-specific)", () => {
+  test(
+    "a saturated scheduler fills its first round with distinct runnable partitions",
+    () => hegel.test((tc) => {
+      const extraPartitions = tc.draw(gs.integers({ minValue: 1, maxValue: 12 }));
+      const partitionCount = FetchState.maxChainConcurrency + extraPartitions;
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        100_000,
+        0,
+      );
+      const ids = Array.from({ length: partitionCount }, (_, index) => `${index}`);
+      const entities = Object.fromEntries(ids.map((id, index) => [id, {
+        id,
+        latestFetchedBlock: { blockNumber: index * 100, blockTimestamp: 0 },
+        selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+        addresses: addressStore.emptySet,
+        mergeBlock: undefined,
+        dynamicContract: undefined,
+        mutPendingQueries: [],
+        sourceRangeCapacity: 10,
+        prevSourceRangeCapacity: 10,
+        eventDensity: 1,
+        latestSourceRangeCapacityUpdateBlock: 0,
+      }]));
+      fetchState.optimizedPartitions = {
+        idsInAscOrder: ids,
+        entities,
+        maxAddrInPartition: MAX_ADDR_IN_PARTITION,
+        nextPartitionIndex: partitionCount,
+        dynamicContracts: new Set(),
+        clientFilteredContracts: new Set(),
+      };
+
+      const action = FetchState.getNextQuery(fetchState, 100_000, 1_000_000);
+      if (action?.TAG !== "Ready") {
+        throw new Error(`Expected Ready, got ${String(action)}`);
+      }
+      const queries = action._0;
+      const distinctPartitions = new Set(queries.map((query: any) => query.partitionId));
+      expect({ queries: queries.length, distinctPartitions: distinctPartitions.size }).toEqual({
+        queries: FetchState.maxChainConcurrency,
+        distinctPartitions: FetchState.maxChainConcurrency,
+      });
+    }),
+  );
+
+  test(
+    "the last free slot goes to a partition with no existing reservations",
+    () => hegel.test((tc) => {
+      const baseBlock = tc.draw(gs.integers({ minValue: 0, maxValue: 10_000 }));
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        100_000,
+        baseBlock,
+      );
+      const reservedSlots = FetchState.maxChainConcurrency - 1;
+      const oldPartitionCount = Math.ceil(
+        reservedSlots / FetchState.maxInFlightChunksPerPartition,
+      );
+      const newcomerId = `${oldPartitionCount}`;
+      const ids = Array.from({ length: oldPartitionCount + 1 }, (_, index) => `${index}`);
+      let remainingReservations = reservedSlots;
+      const entities = Object.fromEntries(ids.map((id, index) => {
+        const frontier = baseBlock + index * 1_000;
+        const inFlight = id === newcomerId
+          ? 0
+          : Math.min(remainingReservations, FetchState.maxInFlightChunksPerPartition);
+        remainingReservations -= inFlight;
+        return [id, {
+          id,
+          latestFetchedBlock: { blockNumber: frontier, blockTimestamp: 0 },
+          selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+          addresses: addressStore.emptySet,
+          mergeBlock: undefined,
+          dynamicContract: undefined,
+          mutPendingQueries: Array.from({ length: inFlight }, (_, queryIndex) => ({
+            fromBlock: frontier + queryIndex * 10 + 1,
+            toBlock: frontier + (queryIndex + 1) * 10,
+            isChunk: true,
+            itemsTarget: undefined,
+            itemsEst: 1,
+            fetchedBlock: undefined,
+          })),
+          sourceRangeCapacity: 10,
+          prevSourceRangeCapacity: 10,
+          eventDensity: 1,
+          latestSourceRangeCapacityUpdateBlock: 0,
+        }];
+      }));
+      fetchState.optimizedPartitions = {
+        idsInAscOrder: ids,
+        entities,
+        maxAddrInPartition: MAX_ADDR_IN_PARTITION,
+        nextPartitionIndex: ids.length,
+        dynamicContracts: new Set(),
+        clientFilteredContracts: new Set(),
+      };
+
+      const action = FetchState.getNextQuery(fetchState, 100_000, 1_000_000);
+      expect(action).toMatchObject({
+        TAG: "Ready",
+        _0: [{ partitionId: newcomerId }],
+      });
+    }),
+  );
+
+  test(
+    "an earlier gap-fill keeps the last free slot when reservations exhaust the budget",
+    () => hegel.test((tc) => {
+      const baseBlock = tc.draw(gs.integers({ minValue: 0, maxValue: 10_000 }));
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        100_000,
+        baseBlock,
+      );
+      const reservedSlots = FetchState.maxChainConcurrency - 1;
+      const firstPartitionReservations = FetchState.maxInFlightChunksPerPartition - 1;
+      const oldPartitionCount = 1 + Math.ceil(
+        (reservedSlots - firstPartitionReservations) /
+          FetchState.maxInFlightChunksPerPartition,
+      );
+      const ids = Array.from({ length: oldPartitionCount + 1 }, (_, index) => `${index}`);
+      let remainingReservations = reservedSlots;
+      const entities = Object.fromEntries(ids.map((id, index) => {
+        const frontier = baseBlock + index * 1_000;
+        const inFlight = index === oldPartitionCount
+          ? 0
+          : Math.min(
+              remainingReservations,
+              index === 0
+                ? firstPartitionReservations
+                : FetchState.maxInFlightChunksPerPartition,
+            );
+        remainingReservations -= inFlight;
+        const firstPendingBlock = frontier + (index === 0 ? 100 : 1);
+        return [id, {
+          id,
+          latestFetchedBlock: { blockNumber: frontier, blockTimestamp: 0 },
+          selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+          addresses: addressStore.emptySet,
+          mergeBlock: undefined,
+          dynamicContract: undefined,
+          mutPendingQueries: Array.from({ length: inFlight }, (_, queryIndex) => ({
+            fromBlock: firstPendingBlock + queryIndex * 10,
+            toBlock: firstPendingBlock + queryIndex * 10 + 9,
+            isChunk: true,
+            itemsTarget: undefined,
+            itemsEst: 1,
+            fetchedBlock: undefined,
+          })),
+          sourceRangeCapacity: 10,
+          prevSourceRangeCapacity: 10,
+          eventDensity: 1,
+          latestSourceRangeCapacityUpdateBlock: 0,
+        }];
+      }));
+      fetchState.optimizedPartitions = {
+        idsInAscOrder: ids,
+        entities,
+        maxAddrInPartition: MAX_ADDR_IN_PARTITION,
+        nextPartitionIndex: ids.length,
+        dynamicContracts: new Set(),
+        clientFilteredContracts: new Set(),
+      };
+
+      const action = FetchState.getNextQuery(fetchState, 100_000, 1);
+      expect(action).toMatchObject({
+        TAG: "Ready",
+        _0: [{ partitionId: "0", rangeReason: "gap_fill", fromBlock: baseBlock + 1 }],
+      });
+    }),
+  );
+
   // https://github.com/ReptilianHQ/dlmm-site/issues/2087
   test(
     "scheduler telemetry accounts for every retained query",
