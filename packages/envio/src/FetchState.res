@@ -2418,6 +2418,26 @@ let pushForwardCandidates = (
   })
 }
 
+let makeSchedulerPartitionSnapshot = (partitionId, p: partition) => {
+  let inFlightQueries = ref(0)
+  let fetchedPendingQueries = ref(0)
+  p.mutPendingQueries->Array.forEach(pendingQuery =>
+    switch pendingQuery.fetchedBlock {
+    | Some(_) => fetchedPendingQueries := fetchedPendingQueries.contents + 1
+    | None => inFlightQueries := inFlightQueries.contents + 1
+    }
+  )
+  let snapshot: RuntimeHooks.fetchSchedulerPartitionSnapshot = {
+    partitionId,
+    frontierBlock: p.latestFetchedBlock.blockNumber,
+    pendingQueries: p.mutPendingQueries->Array.length,
+    inFlightQueries: inFlightQueries.contents,
+    fetchedPendingQueries: fetchedPendingQueries.contents,
+    nextPendingFromBlock: p.mutPendingQueries->Array.get(0)->Option.map(q => q.fromBlock),
+  }
+  snapshot
+}
+
 // Acceptance: merge fresh candidates (Some) with the in-flight reservations
 // (None) and walk them in fromBlock order, starting from the full
 // chainTargetItems. A reservation just draws down the budget — its query is
@@ -2511,7 +2531,14 @@ let acceptCandidates = (
 // rangeTargetDensity × (chainTargetBlock − fromBlock + 1) / inRangeCount — so
 // unknown-density partitions probe in parallel within one budget.
 let getNextQuery = (
-  {optimizedPartitions, blockLag, latestOnBlockBlockNumber, knownHeight, endBlock}: t,
+  {
+    optimizedPartitions,
+    blockLag,
+    latestOnBlockBlockNumber,
+    knownHeight,
+    endBlock,
+    buffer,
+  } as fetchState: t,
   ~chainTargetBlock: int,
   ~chainTargetItems: float,
   ~isRealtime=false,
@@ -2693,7 +2720,7 @@ let getNextQuery = (
 
     let queries = queriesByPartitionIndex->Array.flat
 
-    if queries->Utils.Array.isEmpty {
+    let action = if queries->Utils.Array.isEmpty {
       if shouldWaitForNewBlock.contents {
         WaitingForNewBlock
       } else {
@@ -2702,6 +2729,37 @@ let getNextQuery = (
     } else {
       Ready(queries)
     }
+
+    try {
+      RuntimeHooks.recordFetchScheduler(() => {
+        let partitions = optimizedPartitions.idsInAscOrder->Array.map(partitionId =>
+          makeSchedulerPartitionSnapshot(
+            partitionId,
+            optimizedPartitions.entities->Dict.getUnsafe(partitionId),
+          )
+        )
+        let decision = switch action {
+        | Ready(_) => "ready"
+        | NothingToQuery => "nothing_to_query"
+        | WaitingForNewBlock => "waiting_for_new_block"
+        }
+        {
+          knownHeight,
+          bufferBlock: fetchState->bufferBlockNumber,
+          bufferSize: buffer->Array.length,
+          bufferReadyCount: fetchState->bufferReadyCount,
+          pendingBudget: chainReserved.contents->Float.toInt,
+          availableConcurrency: Pervasives.max(0, availableConcurrency),
+          candidateQueries: candidates->Array.length,
+          acceptedQueries: queries->Array.length,
+          decision,
+          partitions,
+        }
+      })
+    } catch {
+    | _ => ()
+    }
+    action
   }
 }
 

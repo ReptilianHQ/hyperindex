@@ -9,7 +9,7 @@
 // inputs. The threshold is computed directly from the formula and passed
 // explicitly to FetchState.make so the tests are stateless and reproducible.
 
-import { describe, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import * as hegel from "@hegeldev/hegel";
 import * as gs from "@hegeldev/hegel/generators";
 
@@ -74,6 +74,55 @@ const makeFetchState = (
   );
 
 describe("client-filter threshold properties (fork-specific)", () => {
+  // https://github.com/ReptilianHQ/dlmm-site/issues/2087
+  test(
+    "scheduler telemetry accounts for every retained query",
+    () => hegel.test((tc) => {
+      const progressBlock = tc.draw(gs.integers({ minValue: 1, maxValue: 52_000_000 }));
+      const pendingCount = tc.draw(gs.integers({ minValue: 0, maxValue: 16 }));
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        53_000_000,
+        progressBlock,
+      );
+      const partitionId = fetchState.optimizedPartitions.idsInAscOrder[0];
+      const partition = fetchState.optimizedPartitions.entities[partitionId];
+      let fetchedPendingQueries = 0;
+      partition.mutPendingQueries.push(...Array.from({ length: pendingCount }, (_, index) => {
+        const fetched = tc.draw(gs.booleans());
+        if (fetched) fetchedPendingQueries += 1;
+        return {
+          fromBlock: progressBlock + 1 + index * 100,
+          toBlock: progressBlock + 100 + index * 100,
+          isChunk: true,
+          itemsTarget: undefined,
+          itemsEst: 100,
+          fetchedBlock: fetched
+            ? { blockNumber: progressBlock + 100 + index * 100, blockTimestamp: 0 }
+            : undefined,
+        };
+      }));
+
+      expect(FetchState.makeSchedulerPartitionSnapshot(partitionId, partition)).toEqual({
+        partitionId,
+        frontierBlock: progressBlock,
+        pendingQueries: pendingCount,
+        inFlightQueries: pendingCount - fetchedPendingQueries,
+        fetchedPendingQueries,
+        nextPendingFromBlock: pendingCount === 0 ? undefined : progressBlock + 1,
+      });
+    }),
+  );
+
   // For any chain concurrency in the fork's supported range, registering
   // exactly threshold + 1 addresses must promote the contract to client-filter.
   test(

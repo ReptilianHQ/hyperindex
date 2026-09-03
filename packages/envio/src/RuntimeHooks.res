@@ -30,6 +30,33 @@ let recordSourceRange: (string, int) => unit = get("dlmm.chain-indexer.source-ra
   _,
 ) => ())
 
+type fetchSchedulerPartitionSnapshot = {
+  partitionId: string,
+  frontierBlock: int,
+  pendingQueries: int,
+  inFlightQueries: int,
+  fetchedPendingQueries: int,
+  nextPendingFromBlock: option<int>,
+}
+
+type fetchSchedulerSnapshot = {
+  knownHeight: int,
+  bufferBlock: int,
+  bufferSize: int,
+  bufferReadyCount: int,
+  pendingBudget: int,
+  availableConcurrency: int,
+  candidateQueries: int,
+  acceptedQueries: int,
+  decision: string,
+  partitions: array<fetchSchedulerPartitionSnapshot>,
+}
+
+let recordFetchScheduler: (unit => fetchSchedulerSnapshot) => unit = get(
+  "dlmm.chain-indexer.fetch-scheduler-snapshot",
+  _ => (),
+)
+
 type pipelineSnapshot = {queueBatches: int, queueItems: int}
 
 let recordPipeline: (string, pipelineSnapshot) => unit = get("dlmm.chain-indexer.pipeline-event", (
