@@ -75,7 +75,7 @@ const makeFetchState = (
 
 describe("client-filter threshold properties (fork-specific)", () => {
   test(
-    "a saturated scheduler gives every runnable partition a first slot before any gets another",
+    "a saturated scheduler fills its first round with distinct runnable partitions",
     () => hegel.test((tc) => {
       const extraPartitions = tc.draw(gs.integers({ minValue: 1, maxValue: 12 }));
       const partitionCount = FetchState.maxChainConcurrency + extraPartitions;
