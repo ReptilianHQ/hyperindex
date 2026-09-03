@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v3.6.1-reptilian.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing release version whose runtime package needs recovery"
+        required: true
+        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -23,8 +29,14 @@ jobs:
       - name: Validate release version
         id: version
         shell: bash
+        env:
+          RECOVERY_VERSION: ${{ inputs.version }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            version="${RECOVERY_VERSION}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
           if [[ ! "$version" =~ ^3\.6\.1-reptilian\.[0-9]+$ ]]; then
             echo "Unsupported fork version: $version"
             exit 1
@@ -35,9 +47,18 @@ jobs:
         id: find_build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
+          release_sha="${GITHUB_SHA}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag_object=$(gh api "repos/${{ github.repository }}/git/ref/tags/v${VERSION}")
+            release_sha=$(echo "$tag_object" | jq -r '.object.sha')
+            if [ "$(echo "$tag_object" | jq -r '.object.type')" = "tag" ]; then
+              release_sha=$(gh api "repos/${{ github.repository }}/git/tags/${release_sha}" --jq '.object.sha')
+            fi
+          fi
           run_id=""
-          for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/build_and_verify.yml/runs?head_sha=${{ github.sha }}&status=completed&per_page=10" --jq '.workflow_runs[].id'); do
+          for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/build_and_verify.yml/runs?head_sha=${release_sha}&status=completed&per_page=10" --jq '.workflow_runs[].id'); do
             # TEMPORARY: hypersync-health-check dropped from this release's gate.
             # It is failing on live HyperSync API drift unrelated to this release
             # (a chain the fork's Network enum doesn't know about yet) — see
@@ -59,12 +80,14 @@ jobs:
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
 
   build-platforms:
+    if: github.event_name == 'push'
     needs: prepare
     uses: ./.github/workflows/build-platforms.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
 
   publish-platforms:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     needs: [prepare, build-platforms]
     strategy:
@@ -113,6 +136,10 @@ jobs:
         run: npm publish --access public --tag reptilian --provenance
 
   publish-runtime:
+    if: >-
+      always()
+      && needs.prepare.result == 'success'
+      && (github.event_name == 'workflow_dispatch' || needs.publish-platforms.result == 'success')
     runs-on: ubuntu-latest
     needs: [prepare, publish-platforms]
     steps:
