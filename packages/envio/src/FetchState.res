@@ -2593,6 +2593,8 @@ let getNextQuery = (
   ~chainTargetItems: float,
   ~isRealtime=false,
   ~configuredSourceBlocksPerRequest=Env.sourceBlocksPerRequest,
+  ~hyperSyncHeadPollBlocks=Env.hyperSyncHeadPollBlocks,
+  ~willQueryHyperSync=false,
 ) => {
   let sourceBlocksPerRequest = getSourceBlocksPerRequest(
     ~isRealtime,
@@ -2735,7 +2737,14 @@ let getNextQuery = (
       } &&
       fs.inFlightCount + fs.chunksUsedThisCall < maxInFlightChunksPerPartition
 
-    let inRangeStates = fillStates->Array.filter(isInRange)
+    // At realtime, coalesce only HyperSync forward-head work. Backfill, finite
+    // ranges, RPC realtime, gap fills, and in-flight work remain unchanged.
+    let shouldCoalesceHyperSyncHead =
+      isRealtime && willQueryHyperSync && endBlock->Option.isNone && hyperSyncHeadPollBlocks > 1
+    let inRangeStates = fillStates->Array.filter(fs =>
+      isInRange(fs) &&
+      (!shouldCoalesceHyperSyncHead || headBlockNumber - fs.cursor + 1 >= hyperSyncHeadPollBlocks)
+    )
     let inRangeCount = inRangeStates->Array.length
     // The acceptance pass admits at most availableConcurrency fresh queries, in
     // fromBlock order, and every kept partition contributes a candidate at its
@@ -2783,7 +2792,12 @@ let getNextQuery = (
     let queries = queriesByPartitionIndex->Array.flat
 
     let action = if queries->Utils.Array.isEmpty {
-      if shouldWaitForNewBlock.contents {
+      if (
+        shouldWaitForNewBlock.contents ||
+        (shouldCoalesceHyperSyncHead &&
+        reservations->Array.length === 0 &&
+        candidates->Array.length === 0)
+      ) {
         WaitingForNewBlock
       } else {
         NothingToQuery

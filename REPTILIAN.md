@@ -12,8 +12,9 @@ not provide:
 - exact coalescing of compatible address-bound partitions across contract types;
 - configurable per-partition and per-chain request concurrency;
 - optional fixed-block historical source request pacing with finite-boundary
-  handling; realtime fetching retains Envio's native partial-range behavior;
-  and
+  handling;
+- optional `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` coalescing after realtime is
+  reached, without delaying historical backfill or RPC realtime fetching; and
 - low-cardinality source, pipeline, PostgreSQL, and phase telemetry hooks.
 
 Publish only from a `v3.6.1-reptilian.N` tag after Build & Verify succeeds for

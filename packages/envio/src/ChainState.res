@@ -636,6 +636,8 @@ let getNextQuery = (
     ~chainTargetItems,
     ~isRealtime,
     ~configuredSourceBlocksPerRequest=sourceBlocksPerRequest,
+    ~hyperSyncHeadPollBlocks=Env.hyperSyncHeadPollBlocks,
+    ~willQueryHyperSync=cs.sourceManager->SourceManager.willQueryHyperSync(~isRealtime),
   )
 }
 

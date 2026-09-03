@@ -20,6 +20,7 @@ let make: (
 ) => t
 
 let getActiveSource: t => Source.t
+let willQueryHyperSync: (t, ~isRealtime: bool) => bool
 
 type requestStatSample = {
   sourceName: string,
