@@ -198,6 +198,82 @@ describe("client-filter threshold properties (fork-specific)", () => {
     }),
   );
 
+  test(
+    "an earlier gap-fill keeps the last free slot when reservations exhaust the budget",
+    () => hegel.test((tc) => {
+      const baseBlock = tc.draw(gs.integers({ minValue: 0, maxValue: 10_000 }));
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        100_000,
+        baseBlock,
+      );
+      const reservedSlots = FetchState.maxChainConcurrency - 1;
+      const firstPartitionReservations = FetchState.maxInFlightChunksPerPartition - 1;
+      const oldPartitionCount = 1 + Math.ceil(
+        (reservedSlots - firstPartitionReservations) /
+          FetchState.maxInFlightChunksPerPartition,
+      );
+      const ids = Array.from({ length: oldPartitionCount + 1 }, (_, index) => `${index}`);
+      let remainingReservations = reservedSlots;
+      const entities = Object.fromEntries(ids.map((id, index) => {
+        const frontier = baseBlock + index * 1_000;
+        const inFlight = index === oldPartitionCount
+          ? 0
+          : Math.min(
+              remainingReservations,
+              index === 0
+                ? firstPartitionReservations
+                : FetchState.maxInFlightChunksPerPartition,
+            );
+        remainingReservations -= inFlight;
+        const firstPendingBlock = frontier + (index === 0 ? 100 : 1);
+        return [id, {
+          id,
+          latestFetchedBlock: { blockNumber: frontier, blockTimestamp: 0 },
+          selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+          addresses: addressStore.emptySet,
+          mergeBlock: undefined,
+          dynamicContract: undefined,
+          mutPendingQueries: Array.from({ length: inFlight }, (_, queryIndex) => ({
+            fromBlock: firstPendingBlock + queryIndex * 10,
+            toBlock: firstPendingBlock + queryIndex * 10 + 9,
+            isChunk: true,
+            itemsTarget: undefined,
+            itemsEst: 1,
+            fetchedBlock: undefined,
+          })),
+          sourceRangeCapacity: 10,
+          prevSourceRangeCapacity: 10,
+          eventDensity: 1,
+          latestSourceRangeCapacityUpdateBlock: 0,
+        }];
+      }));
+      fetchState.optimizedPartitions = {
+        idsInAscOrder: ids,
+        entities,
+        maxAddrInPartition: MAX_ADDR_IN_PARTITION,
+        nextPartitionIndex: ids.length,
+        dynamicContracts: new Set(),
+        clientFilteredContracts: new Set(),
+      };
+
+      const action = FetchState.getNextQuery(fetchState, 100_000, 1);
+      expect(action).toMatchObject({
+        TAG: "Ready",
+        _0: [{ partitionId: "0", rangeReason: "gap_fill", fromBlock: baseBlock + 1 }],
+      });
+    }),
+  );
+
   // https://github.com/ReptilianHQ/dlmm-site/issues/2087
   test(
     "scheduler telemetry accounts for every retained query",

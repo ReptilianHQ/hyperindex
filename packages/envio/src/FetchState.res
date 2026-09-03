@@ -2450,8 +2450,23 @@ let selectFairCandidates = (
   ~availableConcurrency: int,
   ~inFlightCountByPartition: dict<int>,
 ) => {
+  // A gap-fill repairs range that an existing reservation depends on. Keep the
+  // oldest repairs ahead of ordinary fairness so acceptCandidates can place
+  // them before the later reservation in its block-ordered budget stream. If
+  // fairness sliced them away first, a fully reserved budget could deadlock
+  // even though the chain still had a free concurrency slot.
+  let gapCandidates = candidates->Array.filter(query => query.rangeReason === "gap_fill")
+  gapCandidates->Array.sort((a, b) => Int.compare(a.fromBlock, b.fromBlock))
+  let selectedGapCandidates = gapCandidates->Array.slice(
+    ~start=0,
+    ~end=Pervasives.max(0, availableConcurrency),
+  )
+  let remainingConcurrency = availableConcurrency - selectedGapCandidates->Array.length
+
   let nextRoundByPartition = Dict.make()
-  let ranked = candidates->Array.map(query => {
+  let ranked = candidates
+  ->Array.filter(query => query.rangeReason !== "gap_fill")
+  ->Array.map(query => {
     let round = nextRoundByPartition->Dict.get(query.partitionId)->Option.getOr(0)
     nextRoundByPartition->Dict.set(query.partitionId, round + 1)
     let ownedSlots = inFlightCountByPartition->Dict.get(query.partitionId)->Option.getOr(0)
@@ -2464,9 +2479,11 @@ let selectFairCandidates = (
       Int.compare(a.fromBlock, b.fromBlock)
     }
   )
-  ranked
-  ->Array.slice(~start=0, ~end=Pervasives.max(0, availableConcurrency))
-  ->Array.map(((_, query)) => query)
+  selectedGapCandidates->Array.concat(
+    ranked
+    ->Array.slice(~start=0, ~end=Pervasives.max(0, remainingConcurrency))
+    ->Array.map(((_, query)) => query),
+  )
 }
 
 // Acceptance: merge fresh candidates (Some) with the in-flight reservations
