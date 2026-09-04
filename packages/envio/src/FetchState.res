@@ -2539,7 +2539,7 @@ let acceptCandidates = (
     queriesByPartitionIndex->Array.getUnsafe(partitionIdx)->Array.push(query)->ignore
     usedConcurrency := usedConcurrency.contents + 1
     remainingBudget := remainingBudget.contents -. query.itemsEst->Int.toFloat
-    if remainingBudget.contents <= 0. {
+    if remainingBudget.contents < 0. {
       borrowedFreshBudget := true
     }
     candidateIdx := candidateIdx.contents + 1

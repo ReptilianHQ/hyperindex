@@ -298,11 +298,12 @@ describe("client-filter threshold properties (fork-specific)", () => {
   );
 
   test(
-    "reservation-backed budget admits at most one prerequisite gap",
+    "reservation-backed budget permits only one gap beyond fresh budget",
     () => hegel.test((tc) => {
       const baseBlock = tc.draw(gs.integers({ minValue: 1, maxValue: 100_000 }));
       const reservationItems = tc.draw(gs.integers({ minValue: 1, maxValue: 100 }));
       const gapItems = tc.draw(gs.integers({ minValue: 2, maxValue: 100 }));
+      const freshItems = tc.draw(gs.integers({ minValue: 0, maxValue: gapItems * 3 }));
       const reservationCount = Math.floor(FetchState.maxChainConcurrency / 2);
       const gapCount = FetchState.maxChainConcurrency - reservationCount;
       const reservedPartitionCount = Math.ceil(
@@ -395,13 +396,17 @@ describe("client-filter threshold properties (fork-specific)", () => {
       const action = FetchState.getNextQuery(
         fetchState,
         baseBlock + 50_000,
-        reservationCount * reservationItems + 1,
+        reservationCount * reservationItems + freshItems,
       );
       const queries = action?.TAG === "Ready" ? action._0 : [];
+      const expectedCount = Math.floor(freshItems / gapItems) + 1;
       expect({
         queryCount: queries.length,
         rangeReasons: queries.map((query: any) => query.rangeReason),
-      }).toEqual({ queryCount: 1, rangeReasons: ["gap_fill"] });
+      }).toEqual({
+        queryCount: expectedCount,
+        rangeReasons: Array.from({ length: expectedCount }, () => "gap_fill"),
+      });
     }),
   );
 
