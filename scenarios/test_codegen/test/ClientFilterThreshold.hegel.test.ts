@@ -75,6 +75,169 @@ const makeFetchState = (
 
 describe("client-filter threshold properties (fork-specific)", () => {
   test(
+    "a retained gap ahead of the soft target is still repaired",
+    () => hegel.test((tc) => {
+      const baseBlock = tc.draw(gs.integers({ minValue: 1, maxValue: 100_000 }));
+      const targetSpan = tc.draw(gs.integers({ minValue: 1, maxValue: 4_999 }));
+      const gapOffset = tc.draw(gs.integers({ minValue: targetSpan + 1, maxValue: 10_000 }));
+      const retainedSpan = tc.draw(gs.integers({ minValue: 1, maxValue: 5_000 }));
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        baseBlock + 100_000,
+        baseBlock,
+      );
+      const laggingId = fetchState.optimizedPartitions.idsInAscOrder[0];
+      const gapId = "retained-gap";
+      const gapFrontier = baseBlock + gapOffset;
+      const pendingFromBlock = gapFrontier + retainedSpan + 1;
+      fetchState.optimizedPartitions = {
+        ...fetchState.optimizedPartitions,
+        idsInAscOrder: [laggingId, gapId],
+        entities: {
+          [laggingId]: fetchState.optimizedPartitions.entities[laggingId],
+          [gapId]: {
+            id: gapId,
+            latestFetchedBlock: { blockNumber: gapFrontier, blockTimestamp: 0 },
+            selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+            addresses: addressStore.emptySet,
+            mergeBlock: undefined,
+            dynamicContract: undefined,
+            mutPendingQueries: [{
+              fromBlock: pendingFromBlock,
+              toBlock: pendingFromBlock + retainedSpan - 1,
+              isChunk: true,
+              itemsTarget: undefined,
+              itemsEst: retainedSpan,
+              fetchedBlock: {
+                blockNumber: pendingFromBlock + retainedSpan - 1,
+                blockTimestamp: 0,
+              },
+            }],
+            sourceRangeCapacity: retainedSpan,
+            prevSourceRangeCapacity: retainedSpan,
+            eventDensity: 1,
+            latestSourceRangeCapacityUpdateBlock: 0,
+          },
+        },
+        nextPartitionIndex: 2,
+      };
+
+      // The lagging partition cannot yet fund a full fixed-size historical
+      // chunk. The completed result in the other partition must nevertheless
+      // make its prerequisite gap runnable beyond this soft target.
+      const action = FetchState.getNextQuery(
+        fetchState,
+        baseBlock + targetSpan,
+        1_000_000,
+        false,
+        5_000,
+      );
+      expect(action).toMatchObject({
+        TAG: "Ready",
+        _0: [{
+          partitionId: gapId,
+          fromBlock: gapFrontier + 1,
+          toBlock: pendingFromBlock - 1,
+          rangeReason: "gap_fill",
+        }],
+      });
+    }),
+  );
+
+  test(
+    "retained gaps outside the first fair round cannot starve",
+    () => hegel.test((tc) => {
+      const baseBlock = tc.draw(gs.integers({ minValue: 1, maxValue: 100_000 }));
+      const targetSpan = tc.draw(gs.integers({ minValue: 5_000, maxValue: 15_000 }));
+      const gapCount = tc.draw(gs.integers({ minValue: 1, maxValue: 4 }));
+      const laggingCount = FetchState.maxChainConcurrency + tc.draw(
+        gs.integers({ minValue: 1, maxValue: 8 }),
+      );
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        baseBlock + 100_000,
+        baseBlock,
+      );
+      const laggingIds = Array.from({ length: laggingCount }, (_, index) => `lagging-${index}`);
+      const gapIds = Array.from({ length: gapCount }, (_, index) => `gap-${index}`);
+      const ids = [...laggingIds, ...gapIds];
+      const entities = Object.fromEntries(ids.map((id, index) => {
+        const isGap = index >= laggingCount;
+        const frontier = isGap ? baseBlock + targetSpan + 100 + index : baseBlock;
+        const pendingFromBlock = frontier + 101;
+        return [id, {
+          id,
+          latestFetchedBlock: { blockNumber: frontier, blockTimestamp: 0 },
+          selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+          addresses: addressStore.emptySet,
+          mergeBlock: undefined,
+          dynamicContract: undefined,
+          mutPendingQueries: isGap ? [{
+            fromBlock: pendingFromBlock,
+            toBlock: pendingFromBlock + 99,
+            isChunk: true,
+            itemsTarget: undefined,
+            itemsEst: 100,
+            fetchedBlock: { blockNumber: pendingFromBlock + 99, blockTimestamp: 0 },
+          }] : [],
+          sourceRangeCapacity: 100,
+          prevSourceRangeCapacity: 100,
+          eventDensity: 1,
+          latestSourceRangeCapacityUpdateBlock: 0,
+        }];
+      }));
+      fetchState.optimizedPartitions = {
+        idsInAscOrder: ids,
+        entities,
+        maxAddrInPartition: MAX_ADDR_IN_PARTITION,
+        nextPartitionIndex: ids.length,
+        dynamicContracts: new Set(),
+        clientFilteredContracts: new Set(),
+      };
+
+      const action = FetchState.getNextQuery(
+        fetchState,
+        baseBlock + targetSpan,
+        1_000_000,
+        false,
+        5_000,
+      );
+      if (action?.TAG !== "Ready") {
+        throw new Error(`Expected Ready, got ${String(action)}`);
+      }
+      const queries = action._0;
+      const gapQueries = queries.filter((query: any) => query.rangeReason === "gap_fill");
+      expect({
+        queryCount: queries.length,
+        gapIds: gapQueries.map((query: any) => query.partitionId).sort(),
+        ordinaryCount: queries.length - gapQueries.length,
+      }).toEqual({
+        queryCount: FetchState.maxChainConcurrency,
+        gapIds: [...gapIds].sort(),
+        ordinaryCount: FetchState.maxChainConcurrency - gapCount,
+      });
+    }),
+  );
+
+  test(
     "a saturated scheduler fills its first round with distinct runnable partitions",
     () => hegel.test((tc) => {
       const extraPartitions = tc.draw(gs.integers({ minValue: 1, maxValue: 12 }));

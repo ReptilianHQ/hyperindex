@@ -2092,16 +2092,21 @@ let pushGapFillQueries = (
   ~chainTargetBlock: int,
   ~maybeChunkRange: option<int>,
   ~maxChunks: int,
+  ~unblocksFetchedResponse: bool,
   ~partition: partition,
   ~partitionBudget: float,
   ~selection: selection,
   ~addresses: AddressSet.t,
 ) => {
-  // Gaps past the chain's target block wait: they regenerate from the
-  // pending-walk each tick and fill once the target reaches them. The lagged
-  // head is the fetchable ceiling — blocks past knownHeight - blockLag can't
-  // be queried yet.
-  if rangeFromBlock <= Pervasives.min(headBlockNumber, chainTargetBlock) && maxChunks > 0 {
+  // A gap in front of a completed response already retained in memory is
+  // prerequisite work. Do not gate that repair on chainTargetBlock: the target
+  // is a soft buffer horizon derived from the current fully-fetched frontier,
+  // so it may remain below a more-advanced partition's gap forever. Gaps in
+  // front of requests that are still in flight continue to respect the target
+  // to avoid speculative over-fetching. The lagged head remains the hard
+  // fetchable ceiling in both cases.
+  let targetCeiling = unblocksFetchedResponse ? headBlockNumber : chainTargetBlock
+  if rangeFromBlock <= Pervasives.min(headBlockNumber, targetCeiling) && maxChunks > 0 {
     switch rangeEndBlock {
     | Some(endBlock) if rangeFromBlock > endBlock => ()
     | _ =>
@@ -2213,6 +2218,7 @@ let walkPartitionPending = (
         ~chainTargetBlock,
         ~maybeChunkRange,
         ~maxChunks=maxInFlightChunksPerPartition - inFlightCount - chunksUsedThisCall.contents,
+        ~unblocksFetchedResponse=pq.fetchedBlock !== None,
         ~partition=p,
         ~partitionBudget,
         ~selection=p.selection,
