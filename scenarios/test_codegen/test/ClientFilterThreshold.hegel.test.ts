@@ -75,6 +75,53 @@ const makeFetchState = (
 
 describe("client-filter threshold properties (fork-specific)", () => {
   test(
+    "a historical partition advances when its soft target is shorter than the configured request span",
+    () => hegel.test((tc) => {
+      const baseBlock = tc.draw(gs.integers({ minValue: 1, maxValue: 100_000 }));
+      const configuredSpan = tc.draw(gs.integers({ minValue: 2, maxValue: 10_000 }));
+      const targetSpan = tc.draw(gs.integers({ minValue: 1, maxValue: configuredSpan - 1 }));
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        baseBlock + 100_000,
+        baseBlock,
+      );
+
+      const action = FetchState.getNextQuery(
+        fetchState,
+        baseBlock + targetSpan,
+        100_000,
+        false,
+        configuredSpan,
+      );
+      const query = action?.TAG === "Ready" ? action._0[0] : undefined;
+      expect({
+        tag: action?.TAG ?? action,
+        query: query && {
+          fromBlock: query.fromBlock,
+          toBlock: query.toBlock,
+          rangeReason: query.rangeReason,
+        },
+      }).toEqual({
+        tag: "Ready",
+        query: {
+          fromBlock: baseBlock + 1,
+          toBlock: baseBlock + configuredSpan,
+          rangeReason: "full_range",
+        },
+      });
+    }),
+  );
+
+  test(
     "a retained gap ahead of the soft target is still repaired",
     () => hegel.test((tc) => {
       const baseBlock = tc.draw(gs.integers({ minValue: 1, maxValue: 100_000 }));
@@ -131,9 +178,8 @@ describe("client-filter threshold properties (fork-specific)", () => {
         nextPartitionIndex: 2,
       };
 
-      // The lagging partition cannot yet fund a full fixed-size historical
-      // chunk. The completed result in the other partition must nevertheless
-      // make its prerequisite gap runnable beyond this soft target.
+      // Ordinary forward work and the retained response prerequisite must both
+      // remain runnable even though the soft target is shorter than a fixed chunk.
       const action = FetchState.getNextQuery(
         fetchState,
         baseBlock + targetSpan,
@@ -141,14 +187,25 @@ describe("client-filter threshold properties (fork-specific)", () => {
         false,
         5_000,
       );
-      expect(action).toMatchObject({
-        TAG: "Ready",
-        _0: [{
+      const gapQuery = action?.TAG === "Ready"
+        ? action._0.find((query: any) => query.partitionId === gapId)
+        : undefined;
+      expect({
+        tag: action?.TAG ?? action,
+        gapQuery: gapQuery && {
+          partitionId: gapQuery.partitionId,
+          fromBlock: gapQuery.fromBlock,
+          toBlock: gapQuery.toBlock,
+          rangeReason: gapQuery.rangeReason,
+        },
+      }).toEqual({
+        tag: "Ready",
+        gapQuery: {
           partitionId: gapId,
           fromBlock: gapFrontier + 1,
           toBlock: pendingFromBlock - 1,
           rangeReason: "gap_fill",
-        }],
+        },
       });
     }),
   );

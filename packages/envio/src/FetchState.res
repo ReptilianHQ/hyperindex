@@ -2331,57 +2331,44 @@ let pushForwardCandidates = (
       // its full span (chunkToBlock may exceed the target — only
       // endBlock/mergeBlock are hard bounds).
       let chunkStartCeiling = Pervasives.min(maxBlock, chainTargetBlock)
-      let availableBlocks = chunkStartCeiling - fs.cursor + 1
-      let finalBoundaryReached = switch fs.queryEndBlock {
-      | Some(endBlock) => endBlock <= chainTargetBlock
-      | None => false
-      }
-      if (
-        sourceBlocksPerRequest->Option.isSome &&
-        availableBlocks < chunkSize &&
-        !finalBoundaryReached
+      let created = ref(0)
+      let chunkFromBlock = ref(fs.cursor)
+      // Stop once this partition alone has generated more than the whole fresh
+      // budget: the acceptance pass can hand a single partition at most the
+      // budget plus one overshoot query, so further chunks could never be
+      // accepted. Bounds generation (and the candidate sort) when the budget
+      // is small relative to the pipeline cap.
+      let generatedItems = ref(0.)
+      while (
+        created.contents < maxChunksRemaining &&
+        chunkFromBlock.contents <= chunkStartCeiling &&
+        generatedItems.contents <= freshBudget
       ) {
-        ()
-      } else {
-        let created = ref(0)
-        let chunkFromBlock = ref(fs.cursor)
-        // Stop once this partition alone has generated more than the whole fresh
-        // budget: the acceptance pass can hand a single partition at most the
-        // budget plus one overshoot query, so further chunks could never be
-        // accepted. Bounds generation (and the candidate sort) when the budget
-        // is small relative to the pipeline cap.
-        let generatedItems = ref(0.)
-        while (
-          created.contents < maxChunksRemaining &&
-          chunkFromBlock.contents <= chunkStartCeiling &&
-          generatedItems.contents <= freshBudget
-        ) {
-          let chunkToBlock = Pervasives.min(chunkFromBlock.contents + chunkSize - 1, maxBlock)
-          let rangeReason = if chunkToBlock - chunkFromBlock.contents + 1 === chunkSize {
-            "full_range"
-          } else {
-            switch (p.mergeBlock, fs.queryEndBlock) {
-            | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => "merge_boundary"
-            | (_, Some(_)) => "end_boundary"
-            | _ => "full_range"
-            }
+        let chunkToBlock = Pervasives.min(chunkFromBlock.contents + chunkSize - 1, maxBlock)
+        let rangeReason = if chunkToBlock - chunkFromBlock.contents + 1 === chunkSize {
+          "full_range"
+        } else {
+          switch (p.mergeBlock, fs.queryEndBlock) {
+          | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => "merge_boundary"
+          | (_, Some(_)) => "end_boundary"
+          | _ => "full_range"
           }
-          let itemsEst =
-            candidates->pushDensityPricedQuery(
-              ~partitionId=fs.partitionId,
-              ~fromBlock=chunkFromBlock.contents,
-              ~toBlock=Some(chunkToBlock),
-              ~isChunk=true,
-              ~rangeReason,
-              ~density,
-              ~chainTargetBlock,
-              ~selection=p.selection,
-              ~addresses=p.addresses,
-            )
-          generatedItems := generatedItems.contents +. itemsEst->Int.toFloat
-          chunkFromBlock := chunkToBlock + 1
-          created := created.contents + 1
         }
+        let itemsEst =
+          candidates->pushDensityPricedQuery(
+            ~partitionId=fs.partitionId,
+            ~fromBlock=chunkFromBlock.contents,
+            ~toBlock=Some(chunkToBlock),
+            ~isChunk=true,
+            ~rangeReason,
+            ~density,
+            ~chainTargetBlock,
+            ~selection=p.selection,
+            ~addresses=p.addresses,
+          )
+        generatedItems := generatedItems.contents +. itemsEst->Int.toFloat
+        chunkFromBlock := chunkToBlock + 1
+        created := created.contents + 1
       }
     | _ =>
       // Size the probe by the events its range to the target is expected to
@@ -2493,12 +2480,12 @@ let selectFairCandidates = (
 }
 
 // Acceptance: merge fresh candidates (Some) with the in-flight reservations
-// (None) and walk them in fromBlock order, starting from the full
-// chainTargetItems. A reservation just draws down the budget — its query is
-// already sent — while a candidate draws down the budget and is emitted.
-// Because a gap-fill's fromBlock precedes the in-flight query it unblocks,
-// it claims budget ahead of that reservation, so the buffer never deadlocks
-// waiting on a hole it can't fund. The candidate that tips the budget
+// (None), prioritizing gap fills and then walking each class in fromBlock order
+// from the full chainTargetItems. A reservation just draws down the budget —
+// its query is already sent — while a candidate draws down the budget and is
+// emitted. A gap fill claims budget before the response it unblocks and before
+// ordinary forward work, so neither can strand a retained response. The
+// candidate that tips the budget
 // negative is still emitted (a single overshoot); everything after it waits
 // for a tick with more budget. Accepted queries route back to their
 // partition bucket, so the output stays in idsInAscOrder with each
@@ -2517,12 +2504,22 @@ let acceptCandidates = (
   reservations->Array.forEach(((fromBlock, itemsEst)) =>
     acceptanceStream->Array.push((fromBlock, itemsEst, None))->ignore
   )
-  // Sort by fromBlock; on a tie charge the in-flight reservation (None) before
-  // a fresh candidate (Some), so a same-block candidate can't overshoot the
-  // target buffer. Only a strictly-earlier candidate — a gap-fill, whose
-  // fromBlock precedes the query it unblocks — borrows ahead of a reservation.
-  acceptanceStream->Array.sort(((aFrom, _, aQuery), (bFrom, _, bQuery)) =>
-    if aFrom !== bFrom {
+  // Gap fills are prerequisites for responses already retained in memory.
+  // Keep them ahead of ordinary forward work and reservations here, matching
+  // selectFairCandidates; otherwise an earlier, oversized forward chunk can
+  // consume the tick budget after selection and strand the retained response.
+  // Within each class preserve frontier order. On an equal block, charge an
+  // in-flight reservation before fresh ordinary work.
+  let priority = maybeQuery => switch maybeQuery {
+  | Some(query) if query.rangeReason === "gap_fill" => 0
+  | _ => 1
+  }
+  acceptanceStream->Array.sort(((aFrom, _, aQuery), (bFrom, _, bQuery)) => {
+    let aPriority = priority(aQuery)
+    let bPriority = priority(bQuery)
+    if aPriority !== bPriority {
+      Int.compare(aPriority, bPriority)
+    } else if aFrom !== bFrom {
       Int.compare(aFrom, bFrom)
     } else {
       switch (aQuery, bQuery) {
@@ -2531,13 +2528,13 @@ let acceptCandidates = (
       | (None, None) | (Some(_), Some(_)) => Ordering.equal
       }
     }
-  )
+  })
   let streamCount = acceptanceStream->Array.length
   let remainingBudget = ref(chainTargetItems)
   let acceptIdx = ref(0)
   // In-flight queries count against the chain's concurrency cap alongside the
   // ones accepted this tick; once the cap is reached no later candidate can be
-  // accepted (they're only later in fromBlock order), so the walk stops.
+  // accepted, so the walk stops.
   let usedConcurrency = ref(reservations->Array.length)
   while (
     remainingBudget.contents > 0. &&
@@ -2569,13 +2566,14 @@ let acceptCandidates = (
 // non-positive budget only resolves the wait action and generates no query
 // candidates. With a positive budget, every candidate query — gap-fill holes,
 // plus each in-range partition's chunks or open-ended probe toward the target —
-// is generated with no budget check, then the candidates are sorted by
-// fromBlock and accepted in that order while the budget stays positive. The
-// query that tips it negative is still accepted (a single overshoot);
+// is generated with no budget check, then gap fills are accepted first and
+// remaining work is accepted in fromBlock order while the budget stays
+// positive. The query that tips it negative is still accepted (a single overshoot);
 // everything after it waits for a tick with more budget.
 // Fresh candidates are first selected in partition-fair rounds, oldest cursor
-// first within each round. The selected work is then budgeted in fromBlock
-// order alongside in-flight reservations. This keeps the frontier preference
+// first within each round. The selected work is then budgeted gap-first and in
+// fromBlock order within each class alongside in-flight reservations. This keeps
+// the frontier preference
 // without letting one partition's deeper pipeline consume every chain slot.
 // In-flight reservations release as responses land, so acceptance redistributes
 // across ticks.
