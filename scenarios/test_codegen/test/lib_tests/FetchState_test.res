@@ -4660,7 +4660,7 @@ describe("FetchState.getNextQuery target containment", () => {
       | WaitingForNewBlock => [(-1, None)]
       }
     t.expect({"backfill": next(~isRealtime=false), "realtime": next(~isRealtime=true)}).toEqual({
-      "backfill": [],
+      "backfill": [(101, Some(200))],
       "realtime": [(101, Some(125))],
     })
   })

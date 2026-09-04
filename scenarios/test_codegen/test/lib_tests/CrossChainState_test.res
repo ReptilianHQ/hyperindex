@@ -891,7 +891,7 @@ describe("ChainState cold start", () => {
     t.expect({
       "backfill": await ranges(~isRealtime=false),
       "realtime": await ranges(~isRealtime=true),
-    }).toEqual({"backfill": [], "realtime": [(101, Some(125))]})
+    }).toEqual({"backfill": [(101, Some(125))], "realtime": [(101, Some(125))]})
   })
 
   Async.it("gives a cold chain one 10% admission unit", async t => {

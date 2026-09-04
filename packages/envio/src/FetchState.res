@@ -2310,9 +2310,10 @@ let pushForwardCandidates = (
 
   inRangeStates->Array.forEach(fs => {
     let p = fs.p
-    let maxBlock = switch fs.queryEndBlock {
-    | Some(eb) => eb
-    | None => headBlockNumber
+    let maxBlock = switch (fs.queryEndBlock, sourceBlocksPerRequest) {
+    | (Some(eb), _) => eb
+    | (None, Some(_)) => headBlockNumber
+    | (None, None) => chainTargetBlock
     }
     let chunkPlan = switch sourceBlocksPerRequest {
     | Some(blocks) =>
@@ -2499,9 +2500,14 @@ let acceptCandidates = (
   // response depends on each hole, but a fully reserved tick may borrow for at
   // most one gap. This preserves liveness without multiplying buffer pressure.
   let remainingBudget = ref(chainTargetItems)
-  reservations->Array.forEach(((_, itemsEst)) =>
+  let earliestReservationBlock = ref(None)
+  reservations->Array.forEach(((fromBlock, itemsEst)) => {
     remainingBudget := remainingBudget.contents -. itemsEst->Int.toFloat
-  )
+    earliestReservationBlock := switch earliestReservationBlock.contents {
+    | Some(earliest) => Some(Pervasives.min(earliest, fromBlock))
+    | None => Some(fromBlock)
+    }
+  })
 
   candidates->Array.sort((a, b) => {
     let aPriority = a.rangeReason === "gap_fill" ? 0 : 1
@@ -2513,23 +2519,28 @@ let acceptCandidates = (
 
   let candidateCount = candidates->Array.length
   let candidateIdx = ref(0)
-  let borrowedForGap = ref(false)
+  let borrowedFreshBudget = ref(false)
   let usedConcurrency = ref(reservations->Array.length)
-  let canBorrowForGap = query =>
-    query.rangeReason === "gap_fill" && !borrowedForGap.contents
+  let canBorrowFreshBudget = query =>
+    !borrowedFreshBudget.contents &&
+    (query.rangeReason === "gap_fill" ||
+    switch earliestReservationBlock.contents {
+    | Some(fromBlock) => query.fromBlock < fromBlock
+    | None => false
+    })
   while (
     candidateIdx.contents < candidateCount &&
     usedConcurrency.contents < maxChainConcurrency &&
     (remainingBudget.contents > 0. ||
-    canBorrowForGap(candidates->Array.getUnsafe(candidateIdx.contents)))
+    canBorrowFreshBudget(candidates->Array.getUnsafe(candidateIdx.contents)))
   ) {
     let query = candidates->Array.getUnsafe(candidateIdx.contents)
     let partitionIdx = partitionIndexById->Dict.getUnsafe(query.partitionId)
     queriesByPartitionIndex->Array.getUnsafe(partitionIdx)->Array.push(query)->ignore
     usedConcurrency := usedConcurrency.contents + 1
     remainingBudget := remainingBudget.contents -. query.itemsEst->Int.toFloat
-    if query.rangeReason === "gap_fill" && remainingBudget.contents <= 0. {
-      borrowedForGap := true
+    if remainingBudget.contents <= 0. {
+      borrowedFreshBudget := true
     }
     candidateIdx := candidateIdx.contents + 1
   }
@@ -2611,10 +2622,9 @@ let getNextQuery = (
     // understate the budget and hold a concurrency slot it no longer uses.
     let inFlightCounts = Utils.Array.jsArrayCreate(partitionsCount)
     let inFlightCountByPartition = Dict.make()
-    // (fromBlock, itemsEst) of each still-in-flight query. The acceptance pass
-    // merges these into the candidate stream and draws them down in fromBlock
-    // order, so a gap-fill sitting before an in-flight query claims budget ahead
-    // of it and the buffer unblocks without waiting for that query to return.
+    // (fromBlock, itemsEst) for each still-in-flight query. Admission charges
+    // every reservation before fresh work, while fromBlock preserves the bounded
+    // borrow allowed for an older candidate that must run first.
     let reservations = []
     // In-flight itemsEst summed over the reservations. Sizes fresh forward
     // work below.
