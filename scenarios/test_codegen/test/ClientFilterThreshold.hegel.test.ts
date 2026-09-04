@@ -55,10 +55,11 @@ const makeFetchState = (
   threshold: number,
   knownHeight = 52_000_000,
   progressBlock?: number,
+  unboundedEnd = false,
 ) =>
   FetchState.make(
     0,
-    60_000_000,
+    unboundedEnd ? undefined : 60_000_000,
     registrations,
     addressStore,
     addresses,
@@ -74,6 +75,55 @@ const makeFetchState = (
   );
 
 describe("client-filter threshold properties (fork-specific)", () => {
+  test(
+    "a historical partition advances when its soft target is shorter than the configured request span",
+    () => hegel.test((tc) => {
+      const baseBlock = tc.draw(gs.integers({ minValue: 1, maxValue: 100_000 }));
+      const configuredSpan = tc.draw(gs.integers({ minValue: 2, maxValue: 10_000 }));
+      const targetSpan = tc.draw(gs.integers({ minValue: 1, maxValue: configuredSpan - 1 }));
+      const unboundedEnd = tc.draw(gs.booleans());
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        baseBlock + 100_000,
+        baseBlock,
+        unboundedEnd,
+      );
+
+      const action = FetchState.getNextQuery(
+        fetchState,
+        baseBlock + targetSpan,
+        100_000,
+        false,
+        configuredSpan,
+      );
+      const query = action?.TAG === "Ready" ? action._0[0] : undefined;
+      expect({
+        tag: action?.TAG ?? action,
+        query: query && {
+          fromBlock: query.fromBlock,
+          toBlock: query.toBlock,
+          rangeReason: query.rangeReason,
+        },
+      }).toEqual({
+        tag: "Ready",
+        query: {
+          fromBlock: baseBlock + 1,
+          toBlock: baseBlock + configuredSpan,
+          rangeReason: "full_range",
+        },
+      });
+    }),
+  );
+
   test(
     "a retained gap ahead of the soft target is still repaired",
     () => hegel.test((tc) => {
@@ -131,24 +181,34 @@ describe("client-filter threshold properties (fork-specific)", () => {
         nextPartitionIndex: 2,
       };
 
-      // The lagging partition cannot yet fund a full fixed-size historical
-      // chunk. The completed result in the other partition must nevertheless
-      // make its prerequisite gap runnable beyond this soft target.
+      // Ordinary forward work and the retained response prerequisite must both
+      // remain runnable even though the soft target is shorter than a fixed chunk.
       const action = FetchState.getNextQuery(
         fetchState,
         baseBlock + targetSpan,
-        1_000_000,
+        1,
         false,
         5_000,
       );
-      expect(action).toMatchObject({
-        TAG: "Ready",
-        _0: [{
+      const gapQuery = action?.TAG === "Ready"
+        ? action._0.find((query: any) => query.partitionId === gapId)
+        : undefined;
+      expect({
+        tag: action?.TAG ?? action,
+        gapQuery: gapQuery && {
+          partitionId: gapQuery.partitionId,
+          fromBlock: gapQuery.fromBlock,
+          toBlock: gapQuery.toBlock,
+          rangeReason: gapQuery.rangeReason,
+        },
+      }).toEqual({
+        tag: "Ready",
+        gapQuery: {
           partitionId: gapId,
           fromBlock: gapFrontier + 1,
           toBlock: pendingFromBlock - 1,
           rangeReason: "gap_fill",
-        }],
+        },
       });
     }),
   );
@@ -233,6 +293,119 @@ describe("client-filter threshold properties (fork-specific)", () => {
         queryCount: FetchState.maxChainConcurrency,
         gapIds: [...gapIds].sort(),
         ordinaryCount: FetchState.maxChainConcurrency - gapCount,
+      });
+    }),
+  );
+
+  test(
+    "reservation-backed budget permits only one gap beyond fresh budget",
+    () => hegel.test((tc) => {
+      const baseBlock = tc.draw(gs.integers({ minValue: 1, maxValue: 100_000 }));
+      const reservationItems = tc.draw(gs.integers({ minValue: 1, maxValue: 100 }));
+      const gapItems = tc.draw(gs.integers({ minValue: 2, maxValue: 100 }));
+      const freshItems = tc.draw(gs.integers({ minValue: 0, maxValue: gapItems * 3 }));
+      const reservationCount = Math.floor(FetchState.maxChainConcurrency / 2);
+      const gapCount = FetchState.maxChainConcurrency - reservationCount;
+      const reservedPartitionCount = Math.ceil(
+        reservationCount / FetchState.maxInFlightChunksPerPartition,
+      );
+      const registrations = [makeReg(1, "StaticContract", undefined, false)];
+      const addressStore = AddressStore.make(
+        "evm",
+        true,
+        AddressStore.contractsOf(registrations, []),
+      );
+      const fetchState = makeFetchState(
+        addressStore,
+        registrations,
+        [],
+        thresholdFor(8),
+        baseBlock + 100_000,
+        baseBlock,
+      );
+      const reservedIds = Array.from(
+        { length: reservedPartitionCount },
+        (_, index) => `reserved-${index}`,
+      );
+      const gapIds = Array.from({ length: gapCount }, (_, index) => `gap-${index}`);
+      let remainingReservations = reservationCount;
+      const reservedEntities = Object.fromEntries(reservedIds.map((id) => {
+        const inFlight = Math.min(
+          remainingReservations,
+          FetchState.maxInFlightChunksPerPartition,
+        );
+        remainingReservations -= inFlight;
+        return [id, {
+          id,
+          latestFetchedBlock: { blockNumber: baseBlock, blockTimestamp: 0 },
+          selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+          addresses: addressStore.emptySet,
+          mergeBlock: undefined,
+          dynamicContract: undefined,
+          mutPendingQueries: Array.from({ length: inFlight }, (_, queryIndex) => ({
+            fromBlock: baseBlock + queryIndex * 10 + 1,
+            toBlock: baseBlock + (queryIndex + 1) * 10,
+            isChunk: true,
+            itemsTarget: undefined,
+            itemsEst: reservationItems,
+            fetchedBlock: undefined,
+          })),
+          sourceRangeCapacity: 10,
+          prevSourceRangeCapacity: 10,
+          eventDensity: 1,
+          latestSourceRangeCapacityUpdateBlock: 0,
+        }];
+      }));
+      const gapEntities = Object.fromEntries(gapIds.map((id, index) => {
+        const frontier = baseBlock + 10_000 + index * 1_000;
+        const pendingFromBlock = frontier + gapItems + 1;
+        return [id, {
+          id,
+          latestFetchedBlock: { blockNumber: frontier, blockTimestamp: 0 },
+          selection: { dependsOnAddresses: false, onEventRegistrations: registrations },
+          addresses: addressStore.emptySet,
+          mergeBlock: undefined,
+          dynamicContract: undefined,
+          mutPendingQueries: [{
+            fromBlock: pendingFromBlock,
+            toBlock: pendingFromBlock + gapItems - 1,
+            isChunk: true,
+            itemsTarget: undefined,
+            itemsEst: gapItems,
+            fetchedBlock: {
+              blockNumber: pendingFromBlock + gapItems - 1,
+              blockTimestamp: 0,
+            },
+          }],
+          sourceRangeCapacity: gapItems,
+          prevSourceRangeCapacity: gapItems,
+          eventDensity: 1,
+          latestSourceRangeCapacityUpdateBlock: 0,
+        }];
+      }));
+      const ids = [...reservedIds, ...gapIds];
+      fetchState.optimizedPartitions = {
+        idsInAscOrder: ids,
+        entities: { ...reservedEntities, ...gapEntities },
+        maxAddrInPartition: MAX_ADDR_IN_PARTITION,
+        nextPartitionIndex: ids.length,
+        dynamicContracts: new Set(),
+        clientFilteredContracts: new Set(),
+      };
+
+      const action = FetchState.getNextQuery(
+        fetchState,
+        baseBlock + 50_000,
+        reservationCount * reservationItems + freshItems,
+      );
+      const queries = action?.TAG === "Ready" ? action._0 : [];
+      const expectedCount = Math.floor(freshItems / gapItems) + 1;
+      expect({
+        queryCount: queries.length,
+        rangeReasons: queries.map((query: any) => query.rangeReason),
+      }).toEqual({
+        queryCount: expectedCount,
+        rangeReasons: Array.from({ length: expectedCount }, () => "gap_fill"),
       });
     }),
   );
