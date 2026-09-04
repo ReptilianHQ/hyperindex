@@ -157,7 +157,7 @@ describe("client-filter threshold properties (fork-specific)", () => {
     "retained gaps outside the first fair round cannot starve",
     () => hegel.test((tc) => {
       const baseBlock = tc.draw(gs.integers({ minValue: 1, maxValue: 100_000 }));
-      const targetSpan = tc.draw(gs.integers({ minValue: 1, maxValue: 4_999 }));
+      const targetSpan = tc.draw(gs.integers({ minValue: 5_000, maxValue: 15_000 }));
       const gapCount = tc.draw(gs.integers({ minValue: 1, maxValue: 4 }));
       const laggingCount = FetchState.maxChainConcurrency + tc.draw(
         gs.integers({ minValue: 1, maxValue: 8 }),
@@ -224,8 +224,16 @@ describe("client-filter threshold properties (fork-specific)", () => {
         throw new Error(`Expected Ready, got ${String(action)}`);
       }
       const queries = action._0;
-      expect(new Set(queries.map((query: any) => query.partitionId))).toEqual(new Set(gapIds));
-      expect(queries.every((query: any) => query.rangeReason === "gap_fill")).toBe(true);
+      const gapQueries = queries.filter((query: any) => query.rangeReason === "gap_fill");
+      expect({
+        queryCount: queries.length,
+        gapIds: gapQueries.map((query: any) => query.partitionId).sort(),
+        ordinaryCount: queries.length - gapQueries.length,
+      }).toEqual({
+        queryCount: FetchState.maxChainConcurrency,
+        gapIds: [...gapIds].sort(),
+        ordinaryCount: FetchState.maxChainConcurrency - gapCount,
+      });
     }),
   );
 
