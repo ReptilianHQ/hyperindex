@@ -2287,6 +2287,7 @@ let pushForwardCandidates = (
   // budget control — sizing by the (fewer) admittable queries would let every
   // accepted probe over-fetch its share.
   ~inRangeCount: int,
+  ~headBlockNumber: int,
   ~chainTargetBlock: int,
   ~freshBudget: float,
   ~sourceBlocksPerRequest,
@@ -2311,7 +2312,7 @@ let pushForwardCandidates = (
     let p = fs.p
     let maxBlock = switch fs.queryEndBlock {
     | Some(eb) => eb
-    | None => chainTargetBlock
+    | None => headBlockNumber
     }
     let chunkPlan = switch sourceBlocksPerRequest {
     | Some(blocks) =>
@@ -2443,11 +2444,11 @@ let selectFairCandidates = (
   ~availableConcurrency: int,
   ~inFlightCountByPartition: dict<int>,
 ) => {
-  // A gap-fill repairs range that an existing reservation depends on. Keep the
-  // oldest repairs ahead of ordinary fairness so acceptCandidates can place
-  // them before the later reservation in its block-ordered budget stream. If
-  // fairness sliced them away first, a fully reserved budget could deadlock
-  // even though the chain still had a free concurrency slot.
+  // A gap-fill repairs range that another response depends on. Keep the oldest
+  // repairs ahead of ordinary fairness so acceptCandidates can use the bounded
+  // prerequisite-borrow slot when reservations exhaust the budget. If fairness
+  // sliced them away first, a fully reserved budget could deadlock even though
+  // the chain still had a free concurrency slot.
   let gapCandidates = candidates->Array.filter(query => query.rangeReason === "gap_fill")
   gapCandidates->Array.sort((a, b) => Int.compare(a.fromBlock, b.fromBlock))
   let selectedGapCandidates = gapCandidates->Array.slice(
@@ -2479,17 +2480,13 @@ let selectFairCandidates = (
   )
 }
 
-// Acceptance: merge fresh candidates (Some) with the in-flight reservations
-// (None), prioritizing gap fills and then walking each class in fromBlock order
-// from the full chainTargetItems. A reservation just draws down the budget —
-// its query is already sent — while a candidate draws down the budget and is
-// emitted. A gap fill claims budget before the response it unblocks and before
-// ordinary forward work, so neither can strand a retained response. The
-// candidate that tips the budget
-// negative is still emitted (a single overshoot); everything after it waits
-// for a tick with more budget. Accepted queries route back to their
-// partition bucket, so the output stays in idsInAscOrder with each
-// partition's queries in fromBlock order.
+// Acceptance: charge every in-flight reservation before admitting fresh work,
+// then walk gap fills first and each class in fromBlock order. A candidate that
+// tips the fresh budget negative is still emitted (a single overshoot). When
+// reservations already exhaust the budget, at most one prerequisite gap may
+// borrow so the dependent response cannot remain stranded. Accepted queries
+// route back to their partition bucket, preserving idsInAscOrder and each
+// partition's fromBlock order.
 let acceptCandidates = (
   ~candidates: array<query>,
   ~reservations: array<(int, int)>,
@@ -2497,60 +2494,44 @@ let acceptCandidates = (
   ~partitionIndexById: dict<int>,
   ~queriesByPartitionIndex: array<array<query>>,
 ) => {
-  let acceptanceStream = []
-  candidates->Array.forEach(query =>
-    acceptanceStream->Array.push((query.fromBlock, query.itemsEst, Some(query)))->ignore
-  )
-  reservations->Array.forEach(((fromBlock, itemsEst)) =>
-    acceptanceStream->Array.push((fromBlock, itemsEst, None))->ignore
-  )
-  // Gap fills are prerequisites for responses already retained in memory.
-  // Keep them ahead of ordinary forward work and reservations here, matching
-  // selectFairCandidates; otherwise an earlier, oversized forward chunk can
-  // consume the tick budget after selection and strand the retained response.
-  // Within each class preserve frontier order. On an equal block, charge an
-  // in-flight reservation before fresh ordinary work.
-  let priority = maybeQuery => switch maybeQuery {
-  | Some(query) if query.rangeReason === "gap_fill" => 0
-  | _ => 1
-  }
-  acceptanceStream->Array.sort(((aFrom, _, aQuery), (bFrom, _, bQuery)) => {
-    let aPriority = priority(aQuery)
-    let bPriority = priority(bQuery)
-    if aPriority !== bPriority {
-      Int.compare(aPriority, bPriority)
-    } else if aFrom !== bFrom {
-      Int.compare(aFrom, bFrom)
-    } else {
-      switch (aQuery, bQuery) {
-      | (None, Some(_)) => Ordering.less
-      | (Some(_), None) => Ordering.greater
-      | (None, None) | (Some(_), Some(_)) => Ordering.equal
-      }
-    }
-  })
-  let streamCount = acceptanceStream->Array.length
+  // Reservations are work already sent, so account for them before admitting
+  // anything fresh. Gap fills still lead the fresh queue because another
+  // response depends on each hole, but a fully reserved tick may borrow for at
+  // most one gap. This preserves liveness without multiplying buffer pressure.
   let remainingBudget = ref(chainTargetItems)
-  let acceptIdx = ref(0)
-  // In-flight queries count against the chain's concurrency cap alongside the
-  // ones accepted this tick; once the cap is reached no later candidate can be
-  // accepted, so the walk stops.
-  let usedConcurrency = ref(reservations->Array.length)
-  while (
-    remainingBudget.contents > 0. &&
-    acceptIdx.contents < streamCount &&
-    usedConcurrency.contents < maxChainConcurrency
-  ) {
-    let (_, itemsEst, maybeQuery) = acceptanceStream->Array.getUnsafe(acceptIdx.contents)
-    switch maybeQuery {
-    | Some(query) =>
-      let partitionIdx = partitionIndexById->Dict.getUnsafe(query.partitionId)
-      queriesByPartitionIndex->Array.getUnsafe(partitionIdx)->Array.push(query)->ignore
-      usedConcurrency := usedConcurrency.contents + 1
-    | None => ()
-    }
+  reservations->Array.forEach(((_, itemsEst)) =>
     remainingBudget := remainingBudget.contents -. itemsEst->Int.toFloat
-    acceptIdx := acceptIdx.contents + 1
+  )
+
+  candidates->Array.sort((a, b) => {
+    let aPriority = a.rangeReason === "gap_fill" ? 0 : 1
+    let bPriority = b.rangeReason === "gap_fill" ? 0 : 1
+    aPriority !== bPriority
+      ? Int.compare(aPriority, bPriority)
+      : Int.compare(a.fromBlock, b.fromBlock)
+  })
+
+  let candidateCount = candidates->Array.length
+  let candidateIdx = ref(0)
+  let borrowedForGap = ref(false)
+  let usedConcurrency = ref(reservations->Array.length)
+  let canBorrowForGap = query =>
+    query.rangeReason === "gap_fill" && !borrowedForGap.contents
+  while (
+    candidateIdx.contents < candidateCount &&
+    usedConcurrency.contents < maxChainConcurrency &&
+    (remainingBudget.contents > 0. ||
+    canBorrowForGap(candidates->Array.getUnsafe(candidateIdx.contents)))
+  ) {
+    let query = candidates->Array.getUnsafe(candidateIdx.contents)
+    let partitionIdx = partitionIndexById->Dict.getUnsafe(query.partitionId)
+    queriesByPartitionIndex->Array.getUnsafe(partitionIdx)->Array.push(query)->ignore
+    usedConcurrency := usedConcurrency.contents + 1
+    remainingBudget := remainingBudget.contents -. query.itemsEst->Int.toFloat
+    if query.rangeReason === "gap_fill" && remainingBudget.contents <= 0. {
+      borrowedForGap := true
+    }
+    candidateIdx := candidateIdx.contents + 1
   }
 }
 
@@ -2568,12 +2549,13 @@ let acceptCandidates = (
 // plus each in-range partition's chunks or open-ended probe toward the target —
 // is generated with no budget check, then gap fills are accepted first and
 // remaining work is accepted in fromBlock order while the budget stays
-// positive. The query that tips it negative is still accepted (a single overshoot);
+// positive. The query that tips it negative is still accepted (a single
+// overshoot);
 // everything after it waits for a tick with more budget.
 // Fresh candidates are first selected in partition-fair rounds, oldest cursor
-// first within each round. The selected work is then budgeted gap-first and in
-// fromBlock order within each class alongside in-flight reservations. This keeps
-// the frontier preference
+// first within each round. After reservations are charged, selected work is
+// budgeted gap-first and in fromBlock order within each class. This keeps the
+// frontier preference
 // without letting one partition's deeper pipeline consume every chain slot.
 // In-flight reservations release as responses land, so acceptance redistributes
 // across ticks.
@@ -2774,6 +2756,7 @@ let getNextQuery = (
     candidates->pushForwardCandidates(
       ~inRangeStates,
       ~inRangeCount,
+      ~headBlockNumber,
       ~chainTargetBlock,
       ~freshBudget,
       ~sourceBlocksPerRequest,
