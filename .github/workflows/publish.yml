@@ -59,11 +59,10 @@ jobs:
           fi
           run_id=""
           for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/build_and_verify.yml/runs?head_sha=${release_sha}&status=completed&per_page=10" --jq '.workflow_runs[].id'); do
-            # TEMPORARY: hypersync-health-check dropped from this release's gate.
-            # It is failing on live HyperSync API drift unrelated to this release
-            # (a chain the fork's Network enum doesn't know about yet) — see
-            # dlmm-site follow-up issue for adding the missing chain. Revert this
-            # once that's fixed.
+            # TEMPORARY: hypersync-health-check is excluded from this release gate.
+            # It probes every supported public EVM HyperSync endpoint, so an
+            # unrelated endpoint outage (currently chain 255) can fail independently
+            # of the release artifacts. Revert once endpoint health is non-blocking.
             required=$(gh api "repos/${{ github.repository }}/actions/runs/${candidate}/jobs?per_page=100" \
               --jq '[.jobs[] | select(.name == "build-envio-package" or .name == "cargo-test" or .name == "template-tests" or .name == "scenarios-test" or .name == "e2e-test")]')
             count=$(echo "$required" | jq 'length')
