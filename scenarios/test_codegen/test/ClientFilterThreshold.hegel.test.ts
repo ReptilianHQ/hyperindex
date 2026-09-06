@@ -959,11 +959,12 @@ describe("client-filter threshold properties (fork-specific)", () => {
       // Release the stuck queries the way ChainFetching does once each exhausts
       // its retry budget. Every release must find its query; a second release
       // of the same query must find nothing.
-      for (let i = 0; i < chainConcurrency; i++) {
-        const fromBlock = 37_000_000 + i * 1_000;
+      const stuckQueries = [...backfill.mutPendingQueries];
+      for (const stuck of stuckQueries) {
+        const fromBlock = stuck.fromBlock;
         const released = FetchState.releaseInFlightQuery(afterCrossing, backfill.id, fromBlock);
-        if (released !== 100) {
-          throw new Error(`release at fromBlock=${fromBlock} returned ${released}, expected its reservation of 100`);
+        if (released !== stuck.itemsEst) {
+          throw new Error(`release at fromBlock=${fromBlock} returned ${released}, expected its reservation of ${stuck.itemsEst}`);
         }
         if (FetchState.releaseInFlightQuery(afterCrossing, backfill.id, fromBlock) !== undefined) {
           throw new Error(`second release at fromBlock=${fromBlock} found a query that should be gone`);

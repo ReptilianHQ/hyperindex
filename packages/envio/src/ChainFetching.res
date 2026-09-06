@@ -376,8 +376,10 @@ let fetchChain = async (
             // nothing to release for it.
             if !(state->IndexerState.isStale(~stateId)) {
               let released = chainState->ChainState.releaseInFlightQuery(~query)
-              try RuntimeHooks.recordSourceQueryExhausted(query.partitionId) catch {
-              | _ => ()
+              if released {
+                SourceManager.safelyRecord(() =>
+                  RuntimeHooks.recordSourceQueryExhausted(query.partitionId)
+                )
               }
               Logging.createChild(~params={"chainId": chainId})->Logging.childWarn({
                 "msg": "Block range query gave up after exhausting its retry budget. Its chain slot is released and the range will be re-planned.",

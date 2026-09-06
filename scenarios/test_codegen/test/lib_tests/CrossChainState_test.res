@@ -1061,3 +1061,65 @@ describe("ChainState density from the ready buffer", () => {
     t.expect(cs->ChainState.effectiveDensity).toEqual(Some(1. /. 101.))
   })
 })
+
+describe("ChainState.releaseInFlightQuery", () => {
+  it("returns the buffer reservation the query took, once", t => {
+    // The pair startFetchingQueries adds must come back on release, or every
+    // exhausted query leaks its estimate into pendingBudget for the life of
+    // the process until admission reads the pool as saturated with nothing in
+    // flight.
+    let cs = makeFetchingChainState(
+      ~chainId=1->ChainId.fromInt,
+      ~knownHeight=100_000,
+      ~latestFetchedBlock=1_000,
+    )
+    let queries = switch cs->ChainState.getNextQuery(~chainTargetItems=3000.) {
+    | Ready(queries) => queries
+    | _ => JsError.throwWithMessage("expected a Ready query")
+    }
+    let query = queries->Array.getUnsafe(0)
+    let before = cs->ChainState.pendingBudget
+    cs->ChainState.startFetchingQueries(~queries)
+    let reserved = cs->ChainState.pendingBudget
+    let released = cs->ChainState.releaseInFlightQuery(~query)
+    let after = cs->ChainState.pendingBudget
+    let releasedAgain = cs->ChainState.releaseInFlightQuery(~query)
+    let afterAgain = cs->ChainState.pendingBudget
+    t.expect({
+      "before": before,
+      "reserved": reserved,
+      "released": released,
+      "after": after,
+      "releasedAgain": releasedAgain,
+      "afterAgain": afterAgain,
+    }).toEqual({
+      "before": 0.,
+      "reserved": queries->Array.reduce(0., (acc, q) => acc +. q.itemsEst->Int.toFloat),
+      "released": true,
+      "after": reserved -. query.itemsEst->Int.toFloat,
+      "releasedAgain": false,
+      "afterAgain": reserved -. query.itemsEst->Int.toFloat,
+    })
+  })
+
+  it("never drives the budget negative", t => {
+    // A rollback resets the budget to zero and drops in-flight queries; a late
+    // release for one of them finds nothing and must not subtract.
+    let cs = makeFetchingChainState(
+      ~chainId=1->ChainId.fromInt,
+      ~knownHeight=100_000,
+      ~latestFetchedBlock=1_000,
+    )
+    let queries = switch cs->ChainState.getNextQuery(~chainTargetItems=3000.) {
+    | Ready(queries) => queries
+    | _ => JsError.throwWithMessage("expected a Ready query")
+    }
+    cs->ChainState.startFetchingQueries(~queries)
+    cs->ChainState.resetPendingQueries
+    let released = cs->ChainState.releaseInFlightQuery(~query=queries->Array.getUnsafe(0))
+    t.expect({"released": released, "budget": cs->ChainState.pendingBudget}).toEqual({
+      "released": false,
+      "budget": 0.,
+    })
+  })
+})

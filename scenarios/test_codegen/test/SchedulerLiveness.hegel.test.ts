@@ -136,6 +136,7 @@ const tick = (sim: Sim) => {
     false,
     sim.concurrency,
   );
+  sim.lastAdmitted = [];
   if (action?.TAG !== "Ready") return action;
   const queries: any[] = action._0;
   const free = sim.concurrency - sim.inFlight.length - sim.stuck.length;

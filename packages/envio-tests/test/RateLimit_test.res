@@ -181,14 +181,19 @@ let makeAlwaysNarrowingItemsSource = (): Source.t => {
     ~logger as _,
   ) => {
     let attempted = toBlock->Option.getOr(fromBlock + 1)
-    throw(
-      Source.GetItemsError(
-        FailedGettingItems({
-          exn: Not_found,
-          attemptedToBlock: attempted,
-          retry: WithSuggestedToBlock({toBlock: Pervasives.max(fromBlock, attempted - 1)}),
-        }),
-      ),
+    // Rejects asynchronously: the suggested-range branch has no wait of its
+    // own, so a synchronous throw would spin the event loop for the whole
+    // timeout instead of yielding between attempts.
+    Utils.delay(0)->Promise.then(() =>
+      Promise.reject(
+        Source.GetItemsError(
+          FailedGettingItems({
+            exn: Not_found,
+            attemptedToBlock: attempted,
+            retry: WithSuggestedToBlock({toBlock: Pervasives.max(fromBlock, attempted - 1)}),
+          }),
+        ),
+      )
     )
   },
 }

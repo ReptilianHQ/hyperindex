@@ -56,14 +56,18 @@ describe("Query retry budget", () => {
       let range = (first.payload["fromBlock"], first.payload["toBlock"])
       // Fail the same range through the whole retry budget.
       rejectWithBackoff(first)
+      let lastRetry = ref(first.payload["retry"])
       for _attempt in 2 to Env.maxSourceQueryRetries {
         let call = await waitForItemsCall(sourceMock)
+        lastRetry := call.payload["retry"]
         rejectWithBackoff(call)
       }
 
       // The budget is spent. The query is released and re-planned rather than
       // ending the indexer, so the next call is the same range again, and a
-      // response to it is indexed normally.
+      // response to it is indexed normally. What separates a re-plan from one
+      // more retry is the retry counter the source sees: a re-planned query
+      // starts over at zero, whereas the loop would have reached the budget.
       let replanned = await waitForItemsCall(sourceMock)
       let handled = ref(false)
       replanned.resolve(
@@ -80,16 +84,21 @@ describe("Query retry budget", () => {
       )
       await indexerMock.getBatchWritePromise()
 
-      t.expect({
+      let outcome = {
         "fatalErrors": fatalErrors->Array.length,
         "replannedRange": (replanned.payload["fromBlock"], replanned.payload["toBlock"]),
+        "lastRetryBeforeGiveUp": lastRetry.contents,
+        "replannedRetry": replanned.payload["retry"],
         "handled": handled.contents,
-      }).toEqual({
+      }
+      await indexerMock.stop()
+      t.expect(outcome).toEqual({
         "fatalErrors": 0,
         "replannedRange": range,
+        "lastRetryBeforeGiveUp": Env.maxSourceQueryRetries - 1,
+        "replannedRetry": 0,
         "handled": true,
       })
-      await indexerMock.stop()
     },
   )
 })

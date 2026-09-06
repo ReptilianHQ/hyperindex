@@ -65,6 +65,10 @@ let waitForNewBlock: (
   ~reducedPolling: bool,
 ) => promise<int>
 
+// Runs a telemetry hook, swallowing anything it throws: observation must
+// never fail the observed path.
+let safelyRecord: (unit => unit) => unit
+
 // Raised once a query has exhausted its retry budget (count or wall clock).
 // The caller releases the query's chain slot and re-plans its range.
 exception QueryRetriesExhausted({retries: int, elapsedMillis: int})
