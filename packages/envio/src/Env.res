@@ -39,11 +39,12 @@ let sourceQueryRetryTimeoutMillis =
 // from it.
 let upstreamMaxChainConcurrency = 100
 
-// Switch a single contract to client-side address filtering
-// once its registered address count crosses this threshold. Keeping addresses
+// Switch a single contract to client-side address filtering once its
+// registered address count crosses this threshold. Keeping addresses
 // server-side spreads the contract across ceil(count / maxAddrInPartition)
-// partitions, each holding an in-flight query slot; capping a contract at half
-// the chain's concurrency budget stops one busy contract from monopolising them.
+// partitions, each holding an in-flight query slot, so the default caps a
+// contract at half of upstream's fixed 100-slot budget: 250,000 addresses at
+// the default partition size. MAX_PARTITION_SIZE still scales it.
 //
 // Derived from upstream's constant, not from ENVIO_MAX_CHAIN_CONCURRENCY. That
 // variable is a source-load knob; when it also scaled this switch, CHAIN_CONC=8

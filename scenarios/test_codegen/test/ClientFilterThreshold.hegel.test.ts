@@ -959,19 +959,17 @@ describe("client-filter threshold properties (fork-specific)", () => {
       // Release the stuck queries the way ChainFetching does once each exhausts
       // its retry budget. Every release must find its query; a second release
       // of the same query must find nothing.
-      let releasedState = afterCrossing;
       for (let i = 0; i < chainConcurrency; i++) {
         const fromBlock = 37_000_000 + i * 1_000;
-        const released = FetchState.releaseInFlightQuery(releasedState, backfill.id, fromBlock);
-        if (released === undefined) {
-          throw new Error(`release found no in-flight query at fromBlock=${fromBlock}`);
+        const released = FetchState.releaseInFlightQuery(afterCrossing, backfill.id, fromBlock);
+        if (released !== 100) {
+          throw new Error(`release at fromBlock=${fromBlock} returned ${released}, expected its reservation of 100`);
         }
-        releasedState = released;
-        if (FetchState.releaseInFlightQuery(releasedState, backfill.id, fromBlock) !== undefined) {
+        if (FetchState.releaseInFlightQuery(afterCrossing, backfill.id, fromBlock) !== undefined) {
           throw new Error(`second release at fromBlock=${fromBlock} found a query that should be gone`);
         }
       }
-      const recovered = FetchState.getNextQuery(releasedState, 52_000_000, 100_000);
+      const recovered = FetchState.getNextQuery(afterCrossing, 52_000_000, 100_000);
       if (recovered === "NothingToQuery") {
         throw new Error(
           `Standing partition still starved after stuck queries cleared at concurrency=${chainConcurrency}`,

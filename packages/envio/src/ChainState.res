@@ -477,22 +477,26 @@ let hasReadyItem = (cs: t) =>
 // Mark queries as in flight and reserve their estimated size against the shared
 // buffer budget in one step, so the counter stays in sync with the pending
 // queries it tracks.
-// Frees the slot of a query that never resolved. False when nothing was
-// pending for it: the response already landed, or a rollback dropped the queue.
-let releaseInFlightQuery = (cs: t, ~partitionId, ~fromBlock) =>
-  switch cs.fetchState->FetchState.releaseInFlightQuery(~partitionId, ~fromBlock) {
-  | Some(fetchState) =>
-    cs.fetchState = fetchState
-    true
-  | None => false
-  }
-
 let startFetchingQueries = (cs: t, ~queries: array<FetchState.query>) => {
   cs.fetchState->FetchState.startFetchingQueries(~queries)
   cs.pendingBudget =
     cs.pendingBudget +.
     queries->Array.reduce(0., (acc, query) => acc +. query.itemsEst->Int.toFloat)
 }
+
+// Frees the slot and the buffer reservation of a query that never resolved,
+// the same pair startFetchingQueries took. False when nothing was pending for
+// it: the response already landed, or a rollback dropped the queue.
+let releaseInFlightQuery = (cs: t, ~query: FetchState.query) =>
+  switch cs.fetchState->FetchState.releaseInFlightQuery(
+    ~partitionId=query.partitionId,
+    ~fromBlock=query.fromBlock,
+  ) {
+  | Some(itemsEst) =>
+    cs.pendingBudget = Pervasives.max(0., cs.pendingBudget -. itemsEst->Int.toFloat)
+    true
+  | None => false
+  }
 
 // Drop every in-flight query and release their reservations together, keeping
 // pendingBudget coupled to the pending queries it tracks.

@@ -193,7 +193,8 @@ const run = (tc: any, sim: Sim, maxTicks: number) => {
       if (q.rangeReason === "gap_fill") continue;
       freshByPartition.set(q.partitionId, (freshByPartition.get(q.partitionId) ?? 0) + 1);
     }
-    const passedOver = idleWithWork.filter((id) => !freshByPartition.has(id));
+    const served = new Set(sim.lastAdmitted.map((q) => q.partitionId));
+    const passedOver = idleWithWork.filter((id) => !served.has(id));
     const deepest = Math.max(0, ...freshByPartition.values());
     if (freeBefore > 0 && passedOver.length > 0 && deepest > 1) {
       throw new Error(
@@ -246,28 +247,29 @@ describe("fetch scheduler liveness (fork-specific)", () => {
       const frozen = sim.inFlight.splice(0, Math.min(stuckCount, sim.inFlight.length));
       sim.stuck.push(...frozen);
       const budget = 3 * totalChunks(partitions, span, 5_000) + 4 * partitions + 40;
-      // Frozen queries hold their ranges, so their partitions can never reach
-      // head; liveness is asserted for everything else.
+      // A frozen query pins its partition's frontier forever, so those
+      // partitions are excluded. Every other partition, retired ones included,
+      // must still fetch everything up to its own ceiling (head, or its merge
+      // block) within the budget. A retired partition with unfetched range is
+      // stalled, not done.
       const stuckPartitions = new Set(frozen.map((q) => q.partitionId));
+      const unstuckWithWork = () =>
+        partitionsOf(sim.fs).filter((p) => !stuckPartitions.has(p.id) && hasWork(p, sim.head));
       let ticks = 0;
-      while (ticks < budget) {
+      while (ticks < budget && unstuckWithWork().length > 0) {
         ticks += 1;
         tick(sim);
         if (sim.inFlight.length > 0) {
           const idx = tc.draw(gs.integers({ minValue: 0, maxValue: sim.inFlight.length - 1 }));
           land(sim, idx);
         }
-        const unstuckDone = partitionsOf(sim.fs).every(
-          (p) => stuckPartitions.has(p.id) || !hasWork(p, sim.head) || p.mergeBlock !== undefined,
-        );
-        if (unstuckDone) break;
       }
-      const stalled = partitionsOf(sim.fs).filter(
-        (p) => !stuckPartitions.has(p.id) && hasWork(p, sim.head) && p.mergeBlock === undefined,
+      const stalled = unstuckWithWork().map(
+        (p) => `${p.id}@${p.latestFetchedBlock.blockNumber}->${Math.min(sim.head, p.mergeBlock ?? sim.head)}`,
       );
       expect(
-        stalled.map((p) => p.id),
-        `partitions stalled behind ${stuckCount} stuck slot(s) at concurrency ${concurrency}`,
+        stalled,
+        `partitions still short of their ceiling after ${ticks} ticks behind ${stuckCount} stuck slot(s) at concurrency ${concurrency}`,
       ).toEqual([]);
     }, SETTINGS),
   );
@@ -290,8 +292,9 @@ describe("fetch scheduler liveness (fork-specific)", () => {
       // must find its query exactly once.
       for (const q of sim.stuck.splice(0)) {
         const released = FetchState.releaseInFlightQuery(sim.fs, q.partitionId, q.fromBlock);
-        expect(released, `release of ${q.partitionId}@${q.fromBlock}`).toBeDefined();
-        sim.fs = released;
+        expect(released, `release of ${q.partitionId}@${q.fromBlock} returns its reservation`).toBe(
+          (q as any).raw.itemsEst,
+        );
         expect(
           FetchState.releaseInFlightQuery(sim.fs, q.partitionId, q.fromBlock),
           "a second release must find nothing",

@@ -8,13 +8,7 @@ let safelyRecord = callback =>
 // Raised by executeQuery once a query has exhausted its retry budget. The
 // caller releases the query's chain slot and re-plans its range; nothing about
 // the range is marked fetched.
-exception QueryRetriesExhausted({
-  partitionId: string,
-  fromBlock: int,
-  toBlock: option<int>,
-  retries: int,
-  elapsedMillis: int,
-})
+exception QueryRetriesExhausted({retries: int, elapsedMillis: int})
 
 // Cumulative per-method request count/time for a source, aggregated from the
 // requestStat arrays returned by its methods. Rendered into
@@ -965,15 +959,7 @@ let executeQuery = async (
       "maxRetries": maxRetries,
       "retryTimeoutMillis": retryTimeoutMillis,
     })
-    throw(
-      QueryRetriesExhausted({
-        partitionId: query.partitionId,
-        fromBlock: query.fromBlock,
-        toBlock: query.toBlock,
-        retries: retryRef.contents,
-        elapsedMillis,
-      }),
-    )
+    throw(QueryRetriesExhausted({retries: retryRef.contents, elapsedMillis}))
   }
 }
 
@@ -1056,14 +1042,15 @@ let getBlockHashes = async (sourceManager: t, ~blockNumbers: array<int>, ~isReal
   | Some(response) => response
   | None =>
     let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
+    let elapsedMillis = (Date.now() -. startedAt)->Float.toInt
     logger->Logging.childError({
       "msg": `Block hash query did not resolve within its retry budget.`,
       "blockNumbers": blockNumbers,
       "retries": retryRef.contents,
-      "elapsedMillis": (Date.now() -. startedAt)->Float.toInt,
+      "elapsedMillis": elapsedMillis,
     })
     JsError.throwWithMessage(
-      `Block hash query exhausted its retry budget after ${retryRef.contents->Int.toString} retries`,
+      `Block hash query did not resolve within its retry budget (${retryRef.contents->Int.toString} retries, ${elapsedMillis->Int.toString} ms)`,
     )
   }
 }

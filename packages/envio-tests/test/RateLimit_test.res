@@ -157,6 +157,42 @@ let makeAlwaysFailingItemsSource = (~backoffMillis: int): Source.t => {
     ),
 }
 
+// Mock source that always answers with a narrower suggested range. That branch
+// resets the retry counter on every attempt and never waits, so only the wall
+// clock can end it.
+let makeAlwaysNarrowingItemsSource = (): Source.t => {
+  name: "MockNarrowingHyperSync",
+  sourceFor: Sync,
+  chainId,
+  poweredByHyperSync: true,
+  pollingInterval: 100,
+  getBlockHashes: (~blockNumbers as _, ~logger as _) =>
+    JsError.throwWithMessage("Not used by retry budget test"),
+  getHeightOrThrow: () => Promise.resolve({Source.height: 100, requestStats: []}),
+  getItemsOrThrow: (
+    ~fromBlock,
+    ~toBlock,
+    ~addressSet as _,
+    ~knownHeight as _,
+    ~partitionId as _,
+    ~selection as _,
+    ~itemsTarget as _,
+    ~retry as _,
+    ~logger as _,
+  ) => {
+    let attempted = toBlock->Option.getOr(fromBlock + 1)
+    throw(
+      Source.GetItemsError(
+        FailedGettingItems({
+          exn: Not_found,
+          attemptedToBlock: attempted,
+          retry: WithSuggestedToBlock({toBlock: Pervasives.max(fromBlock, attempted - 1)}),
+        }),
+      ),
+    )
+  },
+}
+
 let makeRangeQuery = (): FetchState.query => {
   partitionId: "7",
   fromBlock: 1,
@@ -189,12 +225,9 @@ describe("SourceManager.executeQuery retry budget", () => {
       )
       "resolved"
     } catch {
-    | SourceManager.QueryRetriesExhausted({partitionId, fromBlock, toBlock, retries}) =>
-      `exhausted partition=${partitionId} range=${fromBlock->Int.toString}..${toBlock
-        ->Option.getOr(-1)
-        ->Int.toString} retries=${retries->Int.toString}`
+    | SourceManager.QueryRetriesExhausted({retries}) => `exhausted retries=${retries->Int.toString}`
     }
-    t.expect(outcome).toEqual("exhausted partition=7 range=1..10 retries=3")
+    t.expect(outcome).toEqual("exhausted retries=3")
   })
 
   Async.it("gives the query up on wall clock even while the retry count is far off", async t => {
@@ -222,5 +255,28 @@ describe("SourceManager.executeQuery retry budget", () => {
       "outcome": "exhausted by time",
       "boundedWait": true,
     })
+  })
+
+  Async.it("gives up on wall clock when every attempt resets the retry counter", async t => {
+    let sourceManager = SourceManager.make(
+      ~sources=[makeAlwaysNarrowingItemsSource()],
+      ~isRealtime=false,
+    )
+    let outcome = try {
+      let _ = await sourceManager->SourceManager.executeQuery(
+        ~query=makeRangeQuery(),
+        ~knownHeight=100,
+        ~isRealtime=false,
+        ~maxRetries=3,
+        ~retryTimeoutMillis=1_000,
+      )
+      "resolved"
+    } catch {
+    | SourceManager.QueryRetriesExhausted({retries, elapsedMillis}) =>
+      // The counter is reset to zero on every suggested-range retry, so it can
+      // never reach 3; the clock is the only bound that fires.
+      retries === 0 && elapsedMillis >= 1_000 ? "exhausted by time with counter reset" : `retries=${retries->Int.toString}`
+    }
+    t.expect(outcome).toEqual("exhausted by time with counter reset")
   })
 })

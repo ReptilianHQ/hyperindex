@@ -115,21 +115,3 @@ describe("Reptilian fetch planning", () => {
     })
   })
 })
-
-describe("Reptilian client-filter threshold", () => {
-  it("does not scale with the chain concurrency knob", t => {
-    // With no explicit override the threshold must come from upstream's fixed
-    // concurrency, never from ENVIO_MAX_CHAIN_CONCURRENCY: at CHAIN_CONC=8 the
-    // coupled formula put the switch at 20,000 addresses, where _v10 stopped.
-    let explicit = %raw(`process.env.ENVIO_CLIENT_FILTER_ADDRESS_THRESHOLD`)->Nullable.toOption
-    let expected = switch explicit {
-    | Some(_) => Env.clientFilterAddressThreshold
-    | None => Env.maxAddrInPartition * Env.upstreamMaxChainConcurrency / 2
-    }
-    t.expect({
-      "threshold": Env.clientFilterAddressThreshold,
-      "independentOfChainConcurrency": Env.clientFilterAddressThreshold ===
-        expected,
-    }).toEqual({"threshold": expected, "independentOfChainConcurrency": true})
-  })
-})

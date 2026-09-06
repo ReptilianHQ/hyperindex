@@ -2018,16 +2018,16 @@ let startFetchingQueries = ({optimizedPartitions}: t, ~queries: array<query>) =>
   }
 }
 
-// Drops one still-in-flight query so the chain slot it reserves is free again.
-// Its range is not marked fetched: the pending walk finds the hole in front of
-// whatever landed after it and regenerates it as a gap fill on the next tick,
-// so latestFetchedBlock still moves only on a response. A retired partition
-// (mergeBlock reached) whose last in-flight query is released has nothing left
-// to land, so it is deleted here the way handleQueryResponse would have.
-// None when there is nothing to release: the response already landed, or a
-// rollback already dropped the queue.
-let releaseInFlightQuery = (fetchState: t, ~partitionId, ~fromBlock) => {
-  let {optimizedPartitions} = fetchState
+// Drops one still-in-flight query so the chain slot it reserves is free again,
+// and returns the buffer reservation it carried so the caller can return that
+// too. Its range is not marked fetched: the pending walk finds the hole in
+// front of whatever landed after it and regenerates it as a gap fill on the
+// next tick, so latestFetchedBlock still moves only on a response. A retired
+// partition left with nothing in flight is dropped by the next partition
+// rebuild, exactly as after a landed response. None when there is nothing to
+// release: the response already landed, or a rollback already dropped the
+// queue.
+let releaseInFlightQuery = ({optimizedPartitions}: t, ~partitionId, ~fromBlock) =>
   switch optimizedPartitions.entities->Dict.get(partitionId) {
   | None => None
   | Some(p) =>
@@ -2038,31 +2038,11 @@ let releaseInFlightQuery = (fetchState: t, ~partitionId, ~fromBlock) => {
     if idx === -1 {
       None
     } else {
+      let released = p.mutPendingQueries->Array.getUnsafe(idx)
       p.mutPendingQueries->Array.splice(~start=idx, ~remove=1, ~insert=[])->ignore
-      let retiredAndDone = switch p.mergeBlock {
-      | Some(mergeBlock) => p.latestFetchedBlock.blockNumber >= mergeBlock && !(p->isFetching)
-      | None => false
-      }
-      if retiredAndDone {
-        let mutEntities = optimizedPartitions.entities->Utils.Dict.shallowCopy
-        mutEntities->Utils.Dict.deleteInPlace(p.id)
-        Some(
-          fetchState->updateInternal(
-            ~optimizedPartitions=OptimizedPartitions.make(
-              ~partitions=mutEntities->Dict.valuesToArray,
-              ~maxAddrInPartition=optimizedPartitions.maxAddrInPartition,
-              ~nextPartitionIndex=optimizedPartitions.nextPartitionIndex,
-              ~dynamicContracts=optimizedPartitions.dynamicContracts,
-              ~clientFilteredContracts=optimizedPartitions.clientFilteredContracts,
-            ),
-          ),
-        )
-      } else {
-        Some(fetchState)
-      }
+      Some(released.itemsEst)
     }
   }
-}
 
 // Most parallel in-flight chunk queries a single partition may have at once.
 // Only queries still being fetched count — a fetched chunk parked behind a gap

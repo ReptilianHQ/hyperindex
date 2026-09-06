@@ -67,13 +67,7 @@ let waitForNewBlock: (
 
 // Raised once a query has exhausted its retry budget (count or wall clock).
 // The caller releases the query's chain slot and re-plans its range.
-exception QueryRetriesExhausted({
-  partitionId: string,
-  fromBlock: int,
-  toBlock: option<int>,
-  retries: int,
-  elapsedMillis: int,
-})
+exception QueryRetriesExhausted({retries: int, elapsedMillis: int})
 
 let executeQuery: (
   t,
