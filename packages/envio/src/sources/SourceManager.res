@@ -5,6 +5,17 @@ let safelyRecord = callback =>
   | _ => ()
   }
 
+// Raised by executeQuery once a query has exhausted its retry budget. The
+// caller releases the query's chain slot and re-plans its range; nothing about
+// the range is marked fetched.
+exception QueryRetriesExhausted({
+  partitionId: string,
+  fromBlock: int,
+  toBlock: option<int>,
+  retries: int,
+  elapsedMillis: int,
+})
+
 // Cumulative per-method request count/time for a source, aggregated from the
 // requestStat arrays returned by its methods. Rendered into
 // envio_source_request_* by Metrics.renderSourceRequests.
@@ -720,6 +731,8 @@ let executeQuery = async (
   ~query: FetchState.query,
   ~knownHeight,
   ~isRealtime,
+  ~maxRetries=Env.maxSourceQueryRetries,
+  ~retryTimeoutMillis=Env.sourceQueryRetryTimeoutMillis,
 ) => {
   let noSourcesError = "The indexer doesn't have data-sources which can continue fetching. Please, check the error logs or reach out to the Envio team."
 
@@ -729,16 +742,20 @@ let executeQuery = async (
   let toBlockRef = ref(query.toBlock)
   let responseRef = ref(None)
   let retryRef = ref(0)
-  // Hard cap: a query that retries past this limit has consumed all sources and
-  // all backoff windows. Throwing releases the concurrency reservation so
-  // getNextQuery can issue fresh queries rather than starving indefinitely.
-  // Without this cap the while loop spins forever, holding a reservation that
-  // availableConcurrency subtracts — blocking every other partition on the
-  // chain. Observed to deadlock at CHAIN_CONC=1 and cause silent partial
-  // indexing at CHAIN_CONC=8 (_v10 incident, dlmm-site#2087).
-  let maxRetries = 200
+  // Bounded on two axes. Without a bound the loop spins forever, holding a
+  // reservation that availableConcurrency subtracts and blocking every other
+  // partition on the chain: a full deadlock at CHAIN_CONC=1, silent partial
+  // indexing at CHAIN_CONC=8 (_v10 incident, dlmm-site#2087). The retry count
+  // alone is not a bound either -- several branches below reset it, and at up
+  // to 60s of backoff per attempt 200 retries is over three hours of holding a
+  // slot. The wall clock frees the slot in minutes. Giving up costs nothing but
+  // a re-issue: the caller drops the reservation and the range is re-planned.
+  let startedAt = Date.now()
+  let exhausted = () =>
+    retryRef.contents >= maxRetries ||
+      Date.now() -. startedAt >= retryTimeoutMillis->Int.toFloat
 
-  while responseRef.contents->Option.isNone && retryRef.contents < maxRetries {
+  while responseRef.contents->Option.isNone && !exhausted() {
     // Select the best source at the start of every iteration
     let sourceState = switch sourceManager->getNextSource(
       ~isRealtime,
@@ -936,15 +953,26 @@ let executeQuery = async (
   switch responseRef.contents {
   | Some(response) => response
   | None =>
+    let elapsedMillis = (Date.now() -. startedAt)->Float.toInt
     let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
     logger->Logging.childError({
-      "msg": `Block range query exceeded ${maxRetries->Int.toString} retries and did not resolve. Releasing concurrency reservation.`,
+      "msg": `Block range query did not resolve within its retry budget. Releasing its chain slot so the range is re-planned.`,
       "fromBlock": query.fromBlock,
       "toBlock": query.toBlock,
       "partitionId": query.partitionId,
+      "retries": retryRef.contents,
+      "elapsedMillis": elapsedMillis,
+      "maxRetries": maxRetries,
+      "retryTimeoutMillis": retryTimeoutMillis,
     })
-    JsError.throwWithMessage(
-      `Block range query for partition ${query.partitionId} exceeded ${maxRetries->Int.toString} retries`,
+    throw(
+      QueryRetriesExhausted({
+        partitionId: query.partitionId,
+        fromBlock: query.fromBlock,
+        toBlock: query.toBlock,
+        retries: retryRef.contents,
+        elapsedMillis,
+      }),
     )
   }
 }
@@ -952,9 +980,16 @@ let executeQuery = async (
 let getBlockHashes = async (sourceManager: t, ~blockNumbers: array<int>, ~isRealtime: bool) => {
   let responseRef = ref(None)
   let retryRef = ref(0)
-  let maxRetries = 200
+  // Same two bounds as executeQuery. A block-hash query has no partition slot
+  // to release, so exhausting them still fails the indexer -- but in minutes
+  // rather than hours, and the restart resumes from the committed checkpoint.
+  let maxRetries = Env.maxSourceQueryRetries
+  let startedAt = Date.now()
+  let exhausted = () =>
+    retryRef.contents >= maxRetries ||
+      Date.now() -. startedAt >= Env.sourceQueryRetryTimeoutMillis->Int.toFloat
 
-  while responseRef.contents->Option.isNone && retryRef.contents < maxRetries {
+  while responseRef.contents->Option.isNone && !exhausted() {
     let sourceState = switch sourceManager->getNextSource(~isRealtime) {
     | Some(s) => s
     | None =>
@@ -1022,11 +1057,13 @@ let getBlockHashes = async (sourceManager: t, ~blockNumbers: array<int>, ~isReal
   | None =>
     let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
     logger->Logging.childError({
-      "msg": `Block hash query exceeded ${maxRetries->Int.toString} retries and did not resolve. Releasing concurrency reservation.`,
+      "msg": `Block hash query did not resolve within its retry budget.`,
       "blockNumbers": blockNumbers,
+      "retries": retryRef.contents,
+      "elapsedMillis": (Date.now() -. startedAt)->Float.toInt,
     })
     JsError.throwWithMessage(
-      `Block hash query exceeded ${maxRetries->Int.toString} retries`,
+      `Block hash query exhausted its retry budget after ${retryRef.contents->Int.toString} retries`,
     )
   }
 }

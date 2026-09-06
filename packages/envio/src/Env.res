@@ -23,16 +23,38 @@ let hyperSyncHeadPollBlocks =
 let maxChainConcurrency =
   envSafe->EnvSafe.get("ENVIO_MAX_CHAIN_CONCURRENCY", S.int->S.intMin(1), ~fallback=100)
 
+// Bounds for one source query's retry loop. Past either, the query gives up
+// its chain slot and its range is re-planned on the next fetch tick instead of
+// holding the slot for hours (see SourceManager.executeQuery).
+let maxSourceQueryRetries =
+  envSafe->EnvSafe.get("ENVIO_SOURCE_QUERY_MAX_RETRIES", S.int->S.intMin(1), ~fallback=200)
+let sourceQueryRetryTimeoutMillis =
+  envSafe->EnvSafe.get(
+    "ENVIO_SOURCE_QUERY_RETRY_TIMEOUT_MILLIS",
+    S.int->S.intMin(1_000),
+    ~fallback=600_000,
+  )
+
+// Upstream's fixed chain concurrency. Only the threshold below still derives
+// from it.
+let upstreamMaxChainConcurrency = 100
+
 // Switch a single contract to client-side address filtering
 // once its registered address count crosses this threshold. Keeping addresses
 // server-side spreads the contract across ceil(count / maxAddrInPartition)
 // partitions, each holding an in-flight query slot; capping a contract at half
 // the chain's concurrency budget stops one busy contract from monopolising them.
+//
+// Derived from upstream's constant, not from ENVIO_MAX_CHAIN_CONCURRENCY. That
+// variable is a source-load knob; when it also scaled this switch, CHAIN_CONC=8
+// silently moved the switch to 20,000 addresses, which is where the _v10
+// replay stopped registering contracts (dlmm-site#2087). Move the switch
+// deliberately with ENVIO_CLIENT_FILTER_ADDRESS_THRESHOLD.
 let clientFilterAddressThreshold =
   envSafe->EnvSafe.get(
     "ENVIO_CLIENT_FILTER_ADDRESS_THRESHOLD",
     S.int,
-    ~fallback=maxAddrInPartition * maxChainConcurrency / 2,
+    ~fallback=maxAddrInPartition * upstreamMaxChainConcurrency / 2,
   )
 
 // Target number of in-memory objects (uncommitted entity/effect changes plus

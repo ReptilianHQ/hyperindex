@@ -123,3 +123,104 @@ describe("SourceManager.getBlockHashes rate limit handling", () => {
     },
   )
 })
+
+// Mock source whose block-range queries never succeed: every call fails with a
+// backoff retry, the shape a persistently degraded provider produces.
+let makeAlwaysFailingItemsSource = (~backoffMillis: int): Source.t => {
+  name: "MockFailingHyperSync",
+  sourceFor: Sync,
+  chainId,
+  poweredByHyperSync: true,
+  pollingInterval: 100,
+  getBlockHashes: (~blockNumbers as _, ~logger as _) =>
+    JsError.throwWithMessage("Not used by retry budget test"),
+  getHeightOrThrow: () => Promise.resolve({Source.height: 100, requestStats: []}),
+  getItemsOrThrow: (
+    ~fromBlock as _,
+    ~toBlock,
+    ~addressSet as _,
+    ~knownHeight as _,
+    ~partitionId as _,
+    ~selection as _,
+    ~itemsTarget as _,
+    ~retry as _,
+    ~logger as _,
+  ) =>
+    throw(
+      Source.GetItemsError(
+        FailedGettingItems({
+          exn: Not_found,
+          attemptedToBlock: toBlock->Option.getOr(0),
+          retry: WithBackoff({message: "mock provider failure", backoffMillis}),
+        }),
+      ),
+    ),
+}
+
+let makeRangeQuery = (): FetchState.query => {
+  partitionId: "7",
+  fromBlock: 1,
+  toBlock: Some(10),
+  isChunk: true,
+  rangeReason: "full_range",
+  itemsTarget: None,
+  itemsEst: 1,
+  selection: FetchState.makeSelection(~dependsOnAddresses=true, ~onEventRegistrations=[]),
+  addresses: AddressStore.make(
+    ~ecosystem=Ecosystem.Evm,
+    ~shouldChecksum=false,
+    ~contracts=[],
+  )->AddressStore.emptySet,
+}
+
+describe("SourceManager.executeQuery retry budget", () => {
+  Async.it("gives the query up after the retry count so its slot can be re-planned", async t => {
+    let sourceManager = SourceManager.make(
+      ~sources=[makeAlwaysFailingItemsSource(~backoffMillis=1)],
+      ~isRealtime=false,
+    )
+    let outcome = try {
+      let _ = await sourceManager->SourceManager.executeQuery(
+        ~query=makeRangeQuery(),
+        ~knownHeight=100,
+        ~isRealtime=false,
+        ~maxRetries=3,
+        ~retryTimeoutMillis=60_000,
+      )
+      "resolved"
+    } catch {
+    | SourceManager.QueryRetriesExhausted({partitionId, fromBlock, toBlock, retries}) =>
+      `exhausted partition=${partitionId} range=${fromBlock->Int.toString}..${toBlock
+        ->Option.getOr(-1)
+        ->Int.toString} retries=${retries->Int.toString}`
+    }
+    t.expect(outcome).toEqual("exhausted partition=7 range=1..10 retries=3")
+  })
+
+  Async.it("gives the query up on wall clock even while the retry count is far off", async t => {
+    let sourceManager = SourceManager.make(
+      ~sources=[makeAlwaysFailingItemsSource(~backoffMillis=40)],
+      ~isRealtime=false,
+    )
+    let startedAt = Date.now()
+    let outcome = try {
+      let _ = await sourceManager->SourceManager.executeQuery(
+        ~query=makeRangeQuery(),
+        ~knownHeight=100,
+        ~isRealtime=false,
+        ~maxRetries=1_000_000,
+        ~retryTimeoutMillis=1_000,
+      )
+      "resolved"
+    } catch {
+    | SourceManager.QueryRetriesExhausted({retries, elapsedMillis}) =>
+      // Backoff is 40ms, so the count stays tiny while the clock runs out.
+      retries < 1_000 && elapsedMillis >= 1_000 ? "exhausted by time" : "exhausted by count"
+    }
+    let elapsed = Date.now() -. startedAt
+    t.expect({"outcome": outcome, "boundedWait": elapsed < 5_000.}).toEqual({
+      "outcome": "exhausted by time",
+      "boundedWait": true,
+    })
+  })
+})

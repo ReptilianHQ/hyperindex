@@ -65,11 +65,23 @@ let waitForNewBlock: (
   ~reducedPolling: bool,
 ) => promise<int>
 
+// Raised once a query has exhausted its retry budget (count or wall clock).
+// The caller releases the query's chain slot and re-plans its range.
+exception QueryRetriesExhausted({
+  partitionId: string,
+  fromBlock: int,
+  toBlock: option<int>,
+  retries: int,
+  elapsedMillis: int,
+})
+
 let executeQuery: (
   t,
   ~query: FetchState.query,
   ~knownHeight: int,
   ~isRealtime: bool,
+  ~maxRetries: int=?,
+  ~retryTimeoutMillis: int=?,
 ) => promise<Source.blockRangeFetchResponse>
 
 let makeGetHeightRetryInterval: (

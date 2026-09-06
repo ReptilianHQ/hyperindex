@@ -96,6 +96,7 @@ let getNextQuery: (
   ~isRealtime: bool=?,
   ~sourceBlocksPerRequest: option<int>=?,
 ) => FetchState.nextQuery
+let releaseInFlightQuery: (t, ~partitionId: string, ~fromBlock: int) => bool
 let dispatch: (
   t,
   ~executeQuery: FetchState.query => promise<unit>,

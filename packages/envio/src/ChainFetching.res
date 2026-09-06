@@ -368,6 +368,32 @@ let fetchChain = async (
               ~scheduleRollback,
             )
           } catch {
+          | SourceManager.QueryRetriesExhausted({
+              partitionId,
+              fromBlock,
+              toBlock,
+              retries,
+              elapsedMillis,
+            }) =>
+            // Not fatal. The slot is released and the range re-planned on the
+            // next tick; nothing was marked fetched. A stale state has already
+            // dropped its queue in a rollback, the same way it drops a late
+            // response, so there is nothing to release for it.
+            if !(state->IndexerState.isStale(~stateId)) {
+              let released = chainState->ChainState.releaseInFlightQuery(~partitionId, ~fromBlock)
+              Logging.createChild(~params={"chainId": chainId})->Logging.childWarn({
+                "msg": "Block range query gave up after exhausting its retry budget. Its chain slot is released and the range will be re-planned.",
+                "partitionId": partitionId,
+                "fromBlock": fromBlock,
+                "toBlock": toBlock,
+                "retries": retries,
+                "elapsedMillis": elapsedMillis,
+                "released": released,
+              })
+              if released {
+                scheduleFetch()
+              }
+            }
           | exn => IndexerState.errorExit(state, exn->ErrorHandling.make)
           }
         },
