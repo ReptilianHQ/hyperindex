@@ -484,6 +484,20 @@ let startFetchingQueries = (cs: t, ~queries: array<FetchState.query>) => {
     queries->Array.reduce(0., (acc, query) => acc +. query.itemsEst->Int.toFloat)
 }
 
+// Frees the slot and the buffer reservation of a query that never resolved,
+// the same pair startFetchingQueries took. False when nothing was pending for
+// it: the response already landed, or a rollback dropped the queue.
+let releaseInFlightQuery = (cs: t, ~query: FetchState.query) =>
+  switch cs.fetchState->FetchState.releaseInFlightQuery(
+    ~partitionId=query.partitionId,
+    ~fromBlock=query.fromBlock,
+  ) {
+  | Some(itemsEst) =>
+    cs.pendingBudget = Pervasives.max(0., cs.pendingBudget -. itemsEst->Int.toFloat)
+    true
+  | None => false
+  }
+
 // Drop every in-flight query and release their reservations together, keeping
 // pendingBudget coupled to the pending queries it tracks.
 let resetPendingQueries = (cs: t) => {

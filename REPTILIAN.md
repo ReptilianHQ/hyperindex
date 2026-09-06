@@ -15,7 +15,12 @@ not provide:
   handling;
 - optional `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` coalescing after realtime is
   reached, without delaying historical backfill or RPC realtime fetching; and
-- low-cardinality source, pipeline, PostgreSQL, and phase telemetry hooks.
+- low-cardinality source, pipeline, PostgreSQL, and phase telemetry hooks;
+- a client-filter address threshold derived from upstream's fixed concurrency,
+  so `ENVIO_MAX_CHAIN_CONCURRENCY` never moves the filtering switch; and
+- bounded source-query retries (`ENVIO_SOURCE_QUERY_MAX_RETRIES`,
+  `ENVIO_SOURCE_QUERY_RETRY_TIMEOUT_MILLIS`) that release the chain slot and
+  re-plan the range instead of holding the slot until the query resolves.
 
 Publish only from a `v3.6.1-reptilian.N` tag after Build & Verify succeeds for
 the tagged commit. The publish workflow builds all supported native platforms,

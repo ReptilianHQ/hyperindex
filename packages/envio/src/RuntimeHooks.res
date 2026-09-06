@@ -30,6 +30,14 @@ let recordSourceRange: (string, int) => unit = get("dlmm.chain-indexer.source-ra
   _,
 ) => ())
 
+// One query gave up its retry budget and was released for re-planning. A
+// counter on this is how a permanently degraded source shows up: the indexer
+// keeps going, so nothing else does.
+let recordSourceQueryExhausted: string => unit = get(
+  "dlmm.chain-indexer.source-query-exhausted",
+  _ => (),
+)
+
 type fetchSchedulerPartitionSnapshot = {
   partitionId: string,
   frontierBlock: int,

@@ -2018,6 +2018,32 @@ let startFetchingQueries = ({optimizedPartitions}: t, ~queries: array<query>) =>
   }
 }
 
+// Drops one still-in-flight query so the chain slot it reserves is free again,
+// and returns the buffer reservation it carried so the caller can return that
+// too. Its range is not marked fetched: the pending walk finds the hole in
+// front of whatever landed after it and regenerates it as a gap fill on the
+// next tick, so latestFetchedBlock still moves only on a response. A retired
+// partition left with nothing in flight is dropped by the next partition
+// rebuild, exactly as after a landed response. None when there is nothing to
+// release: the response already landed, or a rollback already dropped the
+// queue.
+let releaseInFlightQuery = ({optimizedPartitions}: t, ~partitionId, ~fromBlock) =>
+  switch optimizedPartitions.entities->Dict.get(partitionId) {
+  | None => None
+  | Some(p) =>
+    let idx =
+      p.mutPendingQueries->Array.findIndex(pq =>
+        pq.fromBlock === fromBlock && pq.fetchedBlock === None
+      )
+    if idx === -1 {
+      None
+    } else {
+      let released = p.mutPendingQueries->Array.getUnsafe(idx)
+      p.mutPendingQueries->Array.splice(~start=idx, ~remove=1, ~insert=[])->ignore
+      Some(released.itemsEst)
+    }
+  }
+
 // Most parallel in-flight chunk queries a single partition may have at once.
 // Only queries still being fetched count — a fetched chunk parked behind a gap
 // doesn't hold a slot, so a slow query at the queue head can't starve the
@@ -2494,6 +2520,7 @@ let acceptCandidates = (
   ~chainTargetItems: float,
   ~partitionIndexById: dict<int>,
   ~queriesByPartitionIndex: array<array<query>>,
+  ~maxChainConcurrency: int,
 ) => {
   // Reservations are work already sent, so account for them before admitting
   // anything fresh. Gap fills still lead the fresh queue because another
@@ -2592,6 +2619,9 @@ let getNextQuery = (
   ~configuredSourceBlocksPerRequest=Env.sourceBlocksPerRequest,
   ~hyperSyncHeadPollBlocks=Env.hyperSyncHeadPollBlocks,
   ~willQueryHyperSync=false,
+  // Injectable so the scheduler's fairness and liveness can be tested at any
+  // concurrency without re-reading the environment.
+  ~maxChainConcurrency=maxChainConcurrency,
 ) => {
   let sourceBlocksPerRequest = getSourceBlocksPerRequest(
     ~isRealtime,
@@ -2784,6 +2814,7 @@ let getNextQuery = (
       ~chainTargetItems,
       ~partitionIndexById,
       ~queriesByPartitionIndex,
+      ~maxChainConcurrency,
     )
 
     let queries = queriesByPartitionIndex->Array.flat

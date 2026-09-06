@@ -1,13 +1,11 @@
 // Property-based tests for the fork's client-filter address-threshold behaviour.
-// The threshold formula `maxAddrInPartition * maxChainConcurrency / 2` is fork-
-// specific: upstream hard-codes chainConcurrency=100, making the threshold
-// unreachable in practice. The fork exposes ENVIO_MAX_CHAIN_CONCURRENCY, which
-// silently scales the filtering threshold — the coupling that produced the _v10
-// staging incident (dlmm-site#2087).
-//
-// These tests probe the FetchState + AddressStore boundary with Hegel-generated
-// inputs. The threshold is computed directly from the formula and passed
-// explicitly to FetchState.make so the tests are stateless and reproducible.
+// The fork once derived the threshold as `maxAddrInPartition * chainConcurrency
+// / 2` with chainConcurrency taken from ENVIO_MAX_CHAIN_CONCURRENCY, so a
+// source-load knob silently moved the filtering switch — the coupling that
+// produced the _v10 staging incident (dlmm-site#2087). Env now derives it from
+// upstream's fixed concurrency. These tests keep exercising the switch across
+// the whole range of thresholds that coupling could produce, passing each one
+// explicitly to FetchState.make so the tests stay stateless and reproducible.
 
 import { describe, expect, test } from "vitest";
 import * as hegel from "@hegeldev/hegel";
@@ -28,7 +26,8 @@ const FetchState = await import(
 
 const MAX_ADDR_IN_PARTITION = 5000;
 
-// The fork's threshold formula: floor(maxAddrInPartition * chainConcurrency / 2).
+// A threshold in the range the old coupled formula produced:
+// floor(maxAddrInPartition * chainConcurrency / 2).
 const thresholdFor = (chainConcurrency: number) =>
   Math.floor((MAX_ADDR_IN_PARTITION * chainConcurrency) / 2);
 
@@ -874,21 +873,17 @@ describe("client-filter threshold properties (fork-specific)", () => {
     }),
   );
 
-  // After the fix (SourceManager retry cap), queries that exhaust all sources
-  // throw rather than spinning forever, so they can no longer hold reservations
-  // indefinitely. The starvation scenario can still occur transiently, but only
-  // until in-flight queries fail and release their slots. This test verifies
-  // that a standing partition with work to do is NOT permanently starved when
-  // the absorbing partition's pending queries are cleared.
-  //
-  // The pre-fix version of this test asserted NothingToQuery (the buggy
-  // outcome). Post-fix it asserts that a query IS produced once stuck
-  // queries are removed — confirming the reservation is released.
+  // A query that exhausts its retry budget throws QueryRetriesExhausted, and
+  // ChainFetching answers by releasing it through FetchState.releaseInFlightQuery
+  // rather than exiting. So the starvation shape can still occur, but only until
+  // the stuck queries hit their budget. This test walks that exact path: with
+  // every slot held the standing partition gets nothing, and releasing the
+  // stuck queries through the same API the runtime uses hands it a query.
   //
   // Uses FetchState.maxChainConcurrency (the env-resolved value) so the stuck
   // query count always matches the actual concurrency cap, regardless of env.
   test(
-    "concurrency starvation: stuck queries from absorbed partition block standing partition (BUG)",
+    "concurrency starvation: stuck queries from an absorbed partition block the standing partition until released",
     () => hegel.test((tc) => {
       // The concurrency cap is fixed by env at test-runner startup — use the
       // actual resolved value, not a drawn one, so the stuck query count matches.
@@ -961,9 +956,20 @@ describe("client-filter threshold properties (fork-specific)", () => {
         );
       }
 
-      // Now clear the stuck queries (simulating the retry cap throwing and
-      // releasing the reservation). The standing partition must then get a query.
-      backfill.mutPendingQueries.length = 0;
+      // Release the stuck queries the way ChainFetching does once each exhausts
+      // its retry budget. Every release must find its query; a second release
+      // of the same query must find nothing.
+      const stuckQueries = [...backfill.mutPendingQueries];
+      for (const stuck of stuckQueries) {
+        const fromBlock = stuck.fromBlock;
+        const released = FetchState.releaseInFlightQuery(afterCrossing, backfill.id, fromBlock);
+        if (released !== stuck.itemsEst) {
+          throw new Error(`release at fromBlock=${fromBlock} returned ${released}, expected its reservation of ${stuck.itemsEst}`);
+        }
+        if (FetchState.releaseInFlightQuery(afterCrossing, backfill.id, fromBlock) !== undefined) {
+          throw new Error(`second release at fromBlock=${fromBlock} found a query that should be gone`);
+        }
+      }
       const recovered = FetchState.getNextQuery(afterCrossing, 52_000_000, 100_000);
       if (recovered === "NothingToQuery") {
         throw new Error(
