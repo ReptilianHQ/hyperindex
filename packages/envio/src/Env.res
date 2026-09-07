@@ -6,20 +6,56 @@
 let targetBufferSize = envSafe->EnvSafe.get("ENVIO_INDEXING_MAX_BUFFER_SIZE", S.option(S.int))
 let maxAddrInPartition = envSafe->EnvSafe.get("MAX_PARTITION_SIZE", S.int, ~fallback=5_000)
 
+let maxPartitionConcurrency =
+  envSafe->EnvSafe.get("ENVIO_MAX_PARTITION_CONCURRENCY", S.int->S.intMin(1), ~fallback=12)
+
+// Historical-only: realtime keeps Envio's adaptive partial-range behavior.
+let sourceBlocksPerRequest =
+  envSafe->EnvSafe.get("ENVIO_SOURCE_BLOCKS_PER_REQUEST", S.option(S.int->S.intMin(1)))
+
+// Minimum newly fetchable blocks to accumulate before another HyperSync query
+// after realtime is reached. One preserves Envio's native per-block behavior.
+let hyperSyncHeadPollBlocks =
+  envSafe->EnvSafe.get("ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS", S.int->S.intMin(1), ~fallback=1)
+
 // Most parallel in-flight queries a single chain may have at once, across all
 // its partitions (consumed as FetchState.maxChainConcurrency).
-let maxChainConcurrency = 100
+let maxChainConcurrency =
+  envSafe->EnvSafe.get("ENVIO_MAX_CHAIN_CONCURRENCY", S.int->S.intMin(1), ~fallback=100)
 
-// Switch a single contract to client-side address filtering
-// once its registered address count crosses this threshold. Keeping addresses
+// Bounds for one source query's retry loop. Past either, the query gives up
+// its chain slot and its range is re-planned on the next fetch tick instead of
+// holding the slot for hours (see SourceManager.executeQuery).
+let maxSourceQueryRetries =
+  envSafe->EnvSafe.get("ENVIO_SOURCE_QUERY_MAX_RETRIES", S.int->S.intMin(1), ~fallback=200)
+let sourceQueryRetryTimeoutMillis =
+  envSafe->EnvSafe.get(
+    "ENVIO_SOURCE_QUERY_RETRY_TIMEOUT_MILLIS",
+    S.int->S.intMin(1_000),
+    ~fallback=600_000,
+  )
+
+// Upstream's fixed chain concurrency. Only the threshold below still derives
+// from it.
+let upstreamMaxChainConcurrency = 100
+
+// Switch a single contract to client-side address filtering once its
+// registered address count crosses this threshold. Keeping addresses
 // server-side spreads the contract across ceil(count / maxAddrInPartition)
-// partitions, each holding an in-flight query slot; capping a contract at half
-// the chain's concurrency budget stops one busy contract from monopolising them.
+// partitions, each holding an in-flight query slot, so the default caps a
+// contract at half of upstream's fixed 100-slot budget: 250,000 addresses at
+// the default partition size. MAX_PARTITION_SIZE still scales it.
+//
+// Derived from upstream's constant, not from ENVIO_MAX_CHAIN_CONCURRENCY. That
+// variable is a source-load knob; when it also scaled this switch, CHAIN_CONC=8
+// silently moved the switch to 20,000 addresses, which is where the _v10
+// replay stopped registering contracts (dlmm-site#2087). Move the switch
+// deliberately with ENVIO_CLIENT_FILTER_ADDRESS_THRESHOLD.
 let clientFilterAddressThreshold =
   envSafe->EnvSafe.get(
     "ENVIO_CLIENT_FILTER_ADDRESS_THRESHOLD",
     S.int,
-    ~fallback=maxAddrInPartition * maxChainConcurrency / 2,
+    ~fallback=maxAddrInPartition * upstreamMaxChainConcurrency / 2,
   )
 
 // Target number of in-memory objects (uncommitted entity/effect changes plus

@@ -689,6 +689,7 @@ let patchConfig = (
           )
           {
             ...chainConfig,
+            blockLag: 0,
             sourceConfig: Config.SimulateSourceConfig({
               items,
               endBlock,

@@ -520,6 +520,20 @@ let startFetchingQueries = (cs: t, ~queries: array<FetchState.query>) => {
     queries->Array.reduce(0., (acc, query) => acc +. query.itemsEst->Int.toFloat)
 }
 
+// Frees the slot and the buffer reservation of a query that never resolved,
+// the same pair startFetchingQueries took. False when nothing was pending for
+// it: the response already landed, or a rollback dropped the queue.
+let releaseInFlightQuery = (cs: t, ~query: FetchState.query) =>
+  switch cs.fetchState->FetchState.releaseInFlightQuery(
+    ~partitionId=query.partitionId,
+    ~fromBlock=query.fromBlock,
+  ) {
+  | Some(itemsEst) =>
+    cs.pendingBudget = Pervasives.max(0., cs.pendingBudget -. itemsEst->Int.toFloat)
+    true
+  | None => false
+  }
+
 // Drop every in-flight query and release their reservations together, keeping
 // pendingBudget coupled to the pending queries it tracks.
 let resetPendingQueries = (cs: t) => {
@@ -640,7 +654,13 @@ let frontierProgress = (cs: t) =>
 // maxTargetBlock set to the most-behind chain's progress mapped onto this
 // chain, so a chain with budget can't run further ahead than the chain the
 // whole pool is prioritizing.
-let getNextQuery = (cs: t, ~chainTargetItems: float, ~maxTargetBlock=?) => {
+let getNextQuery = (
+  cs: t,
+  ~chainTargetItems: float,
+  ~maxTargetBlock=?,
+  ~isRealtime=false,
+  ~sourceBlocksPerRequest=Env.sourceBlocksPerRequest,
+) => {
   let chainTargetBlock = cs->targetBlock(~chainTargetItems)
   let chainTargetBlock = switch maxTargetBlock {
   | Some(maxTargetBlock) => Pervasives.min(chainTargetBlock, maxTargetBlock)
@@ -661,7 +681,14 @@ let getNextQuery = (cs: t, ~chainTargetItems: float, ~maxTargetBlock=?) => {
   // budget to the cold-chain cap, so it's used as-is.
   | _ => chainTargetItems
   }
-  cs.fetchState->FetchState.getNextQuery(~chainTargetBlock, ~chainTargetItems)
+  cs.fetchState->FetchState.getNextQuery(
+    ~chainTargetBlock,
+    ~chainTargetItems,
+    ~isRealtime,
+    ~configuredSourceBlocksPerRequest=sourceBlocksPerRequest,
+    ~hyperSyncHeadPollBlocks=Env.hyperSyncHeadPollBlocks,
+    ~willQueryHyperSync=cs.sourceManager->SourceManager.willQueryHyperSync(~isRealtime),
+  )
 }
 
 // Run a fetch tick for this chain against its sources, feeding the owned fetch

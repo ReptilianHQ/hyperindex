@@ -1,5 +1,15 @@
 type sourceManagerStatus = Idle | WaitingForNewBlock | Querying
 
+let safelyRecord = callback =>
+  try callback() catch {
+  | _ => ()
+  }
+
+// Raised by executeQuery once a query has exhausted its retry budget. The
+// caller releases the query's chain slot and re-plans its range; nothing about
+// the range is marked fetched.
+exception QueryRetriesExhausted({retries: int, elapsedMillis: int})
+
 // Cumulative per-method request count/time for a source, aggregated from the
 // requestStat arrays returned by its methods. Rendered into
 // envio_source_request_* by Metrics.renderSourceRequests.
@@ -197,6 +207,7 @@ let stopRateLimitTimeout = sourceManager => {
 // silent under chronic throttling.
 let waitForRateLimitReset = async (sourceManager: t, ~resetMs, ~retry, ~logger) => {
   let waitMs = Pervasives.min(resetMs, 300_000)
+  safelyRecord(() => RuntimeHooks.recordSourceRateLimit(retry, waitMs))
   let log = retry >= 2 ? Logging.childWarn : Logging.childTrace
   logger->log({
     "msg": `HyperSync source is rate-limited - not critical, the indexer will retry in ${(waitMs / 1000)
@@ -753,6 +764,14 @@ let retryInconsistentResponse = async (
   )
 }
 
+// Mirrors executeQuery's selection without mutating the active source, so the
+// planner never applies HyperSync pacing to realtime RPC or RPC failover.
+let willQueryHyperSync = (sourceManager: t, ~isRealtime) =>
+  switch sourceManager->getNextSource(~isRealtime) {
+  | Some(sourceState) => sourceState.source.poweredByHyperSync
+  | None => false
+  }
+
 // Polls for a block height greater than the given block number to ensure a new block is available for indexing.
 let waitForNewBlock = async (sourceManager: t, ~knownHeight, ~isRealtime, ~reducedPolling) => {
   let {sourcesState} = sourceManager
@@ -880,6 +899,8 @@ let executeQuery = async (
   ~query: FetchState.query,
   ~knownHeight,
   ~isRealtime,
+  ~maxRetries=Env.maxSourceQueryRetries,
+  ~retryTimeoutMillis=Env.sourceQueryRetryTimeoutMillis,
 ) => {
   let noSourcesError = "The indexer doesn't have data-sources which can continue fetching. Please, check the error logs or reach out to the Envio team."
 
@@ -889,8 +910,20 @@ let executeQuery = async (
   let toBlockRef = ref(query.toBlock)
   let responseRef = ref(None)
   let retryRef = ref(0)
+  // Bounded on two axes. Without a bound the loop spins forever, holding a
+  // reservation that availableConcurrency subtracts and blocking every other
+  // partition on the chain: a full deadlock at CHAIN_CONC=1, silent partial
+  // indexing at CHAIN_CONC=8 (_v10 incident, dlmm-site#2087). The retry count
+  // alone is not a bound either -- several branches below reset it, and at up
+  // to 60s of backoff per attempt 200 retries is over three hours of holding a
+  // slot. The wall clock frees the slot in minutes. Giving up costs nothing but
+  // a re-issue: the caller drops the reservation and the range is re-planned.
+  let startedAt = Date.now()
+  let exhausted = () =>
+    retryRef.contents >= maxRetries ||
+      Date.now() -. startedAt >= retryTimeoutMillis->Int.toFloat
 
-  while responseRef.contents->Option.isNone {
+  while responseRef.contents->Option.isNone && !exhausted() {
     // Select the best source at the start of every iteration
     let sourceState = switch sourceManager->getNextSource(
       ~isRealtime,
@@ -930,7 +963,19 @@ let executeQuery = async (
     )
 
     try {
-      let response = await source.getItemsOrThrow(
+      switch (source.poweredByHyperSync, toBlock) {
+      | (true, Some(requestedToBlock)) =>
+        let reason = switch query.toBlock {
+        | Some(plannedToBlock) if plannedToBlock === requestedToBlock => query.rangeReason
+        | _ => "provider_retry"
+        }
+        safelyRecord(() =>
+          RuntimeHooks.recordSourceRange(reason, requestedToBlock - query.fromBlock + 1)
+        )
+      | _ => ()
+      }
+      safelyRecord(() => RuntimeHooks.recordSourceRequest("start", query.partitionId))
+      let request = source.getItemsOrThrow(
         ~fromBlock=query.fromBlock,
         ~toBlock,
         ~addressSet=query.addresses,
@@ -941,6 +986,25 @@ let executeQuery = async (
         ~retry,
         ~logger,
       )
+      let response = try {
+        let response = await request
+        safelyRecord(() => RuntimeHooks.recordSourceRequest("finish", query.partitionId))
+        response
+      } catch {
+      | exn =>
+        safelyRecord(() => RuntimeHooks.recordSourceRequest("finish", query.partitionId))
+        throw(exn)
+      }
+      switch (source.poweredByHyperSync, toBlock) {
+      | (true, Some(requestedToBlock)) =>
+        safelyRecord(() =>
+          RuntimeHooks.recordSourcePage(
+            requestedToBlock - query.fromBlock + 1,
+            response.latestFetchedBlockNumber - query.fromBlock + 1,
+          )
+        )
+      | _ => ()
+      }
       sourceState->recordRequestStats(response.requestStats)
       validateResponseBlockStore(~method="getItems", ~blockStore=response.blockStore)
       sourceState.lastFailedAt = None
@@ -1061,14 +1125,38 @@ let executeQuery = async (
     }
   }
 
-  responseRef.contents->Option.getUnsafe
+  switch responseRef.contents {
+  | Some(response) => response
+  | None =>
+    let elapsedMillis = (Date.now() -. startedAt)->Float.toInt
+    let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
+    logger->Logging.childError({
+      "msg": `Block range query did not resolve within its retry budget. Releasing its chain slot so the range is re-planned.`,
+      "fromBlock": query.fromBlock,
+      "toBlock": query.toBlock,
+      "partitionId": query.partitionId,
+      "retries": retryRef.contents,
+      "elapsedMillis": elapsedMillis,
+      "maxRetries": maxRetries,
+      "retryTimeoutMillis": retryTimeoutMillis,
+    })
+    throw(QueryRetriesExhausted({retries: retryRef.contents, elapsedMillis}))
+  }
 }
 
 let getBlockHashes = async (sourceManager: t, ~blockNumbers: array<int>, ~isRealtime: bool) => {
   let responseRef = ref(None)
   let retryRef = ref(0)
+  // Same two bounds as executeQuery. A block-hash query has no partition slot
+  // to release, so exhausting them still fails the indexer -- but in minutes
+  // rather than hours, and the restart resumes from the committed checkpoint.
+  let maxRetries = Env.maxSourceQueryRetries
+  let startedAt = Date.now()
+  let exhausted = () =>
+    retryRef.contents >= maxRetries ||
+      Date.now() -. startedAt >= Env.sourceQueryRetryTimeoutMillis->Int.toFloat
 
-  while responseRef.contents->Option.isNone {
+  while responseRef.contents->Option.isNone && !exhausted() {
     let sourceState = switch sourceManager->getNextSource(~isRealtime) {
     | Some(s) => s
     | None =>
@@ -1155,5 +1243,19 @@ let getBlockHashes = async (sourceManager: t, ~blockNumbers: array<int>, ~isReal
     }
   }
 
-  responseRef.contents->Option.getUnsafe
+  switch responseRef.contents {
+  | Some(response) => response
+  | None =>
+    let logger = Logging.createChild(~params={"chainId": sourceManager.activeSource.chainId})
+    let elapsedMillis = (Date.now() -. startedAt)->Float.toInt
+    logger->Logging.childError({
+      "msg": `Block hash query did not resolve within its retry budget.`,
+      "blockNumbers": blockNumbers,
+      "retries": retryRef.contents,
+      "elapsedMillis": elapsedMillis,
+    })
+    JsError.throwWithMessage(
+      `Block hash query did not resolve within its retry budget (${retryRef.contents->Int.toString} retries, ${elapsedMillis->Int.toString} ms)`,
+    )
+  }
 }

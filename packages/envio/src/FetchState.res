@@ -113,6 +113,7 @@ type query = {
   fromBlock: int,
   toBlock: option<int>,
   isChunk: bool,
+  rangeReason: string,
   // Server-side maxNumLogs-style cap. Some only for open-ended probes, whose
   // range isn't otherwise bounded; None for bounded chunk/gap-fill queries,
   // whose toBlock already bounds the response so a cap would only self-truncate
@@ -343,6 +344,82 @@ module OptimizedPartitions = {
 
   let ascSortFn = (a, b) => Int.compare(a.latestFetchedBlock, b.latestFetchedBlock)
 
+  let mergeSelection = (a: selection, b: selection) => {
+    let registrations = Dict.make()
+    a.onEventRegistrations->Array.forEach(reg =>
+      registrations->Dict.set(reg.index->Int.toString, reg)
+    )
+    b.onEventRegistrations->Array.forEach(reg =>
+      registrations->Dict.set(reg.index->Int.toString, reg)
+    )
+    makeSelection(~dependsOnAddresses=true, ~onEventRegistrations=registrations->Dict.valuesToArray)
+  }
+
+  let potentialJoinBlock = (p: partition) =>
+    switch p.mutPendingQueries->Utils.Array.last {
+    | Some({toBlock: Some(toBlock)}) => Some(toBlock)
+    | Some({toBlock: None}) => None
+    | None => Some(p.latestFetchedBlock)
+    }
+
+  let coalesceAddressBoundPartitions = (~partitions, ~maxAddrInPartition) => {
+    let stable = []
+    let candidates: array<(partition, int)> = []
+    partitions->Array.forEach(p =>
+      switch p {
+      | {selection: {dependsOnAddresses: true}, mergeBlock: None}
+        if p.selection.clientFilteredContracts->Option.isNone =>
+        switch p->potentialJoinBlock {
+        | Some(joinBlock) => candidates->Array.push((p, joinBlock))->ignore
+        | None => stable->Array.push(p)->ignore
+        }
+      | _ => stable->Array.push(p)->ignore
+      }
+    )
+
+    candidates->Array.sort(((_, a), (_, b)) => Int.compare(a, b))->ignore
+    switch candidates->Array.get(0) {
+    | None => stable
+    | Some(first) =>
+      let current = ref(first)
+      for idx in 1 to candidates->Array.length - 1 {
+        let (left, leftJoinBlock) = current.contents
+        let (right, rightJoinBlock) = candidates->Array.getUnsafe(idx)
+        let addresses = left.addresses->AddressSet.merge(right.addresses)
+        if addresses->AddressSet.size > maxAddrInPartition {
+          stable->Array.push(left)->ignore
+          current := (right, rightJoinBlock)
+        } else {
+          if leftJoinBlock < rightJoinBlock || left->isFetching {
+            stable->Array.push({...left, mergeBlock: Some(rightJoinBlock)})->ignore
+          }
+          let minRange = getMinQueryRange([left, right])
+          let eventDensity = switch (left->getTrustedDensity, right->getTrustedDensity) {
+          | (Some(a), Some(b)) => Some(a +. b)
+          | (Some(density), None) | (None, Some(density)) => Some(density)
+          | (None, None) => None
+          }
+          current :=
+            (
+              {
+                ...right,
+                selection: mergeSelection(left.selection, right.selection),
+                addresses,
+                sourceRangeCapacity: minRange,
+                prevSourceRangeCapacity: minRange,
+                eventDensity,
+                latestSourceRangeCapacityUpdateBlock: 0,
+              },
+              rightJoinBlock,
+            )
+        }
+      }
+      let (last, _) = current.contents
+      stable->Array.push(last)->ignore
+      stable
+    }
+  }
+
   // Contracts a standing address-free partition already fetches client-side.
   // Addresses registered for them after that partition passed get a normal
   // address-bound partition which dies once it catches up (see make), instead
@@ -448,41 +525,46 @@ module OptimizedPartitions = {
       {selection: {dependsOnAddresses: false}} =>
         newPartitions->Array.push(p)->ignore
       | {dynamicContract: Some(contractName)} =>
-        let pAddressesCount = p.addresses->AddressSet.countFor(contractName)
-        // Compute merge block: last pending query's toBlock, or lfb if idle
-        let potentialMergeBlock = switch p.mutPendingQueries->Utils.Array.last {
-        | Some({isChunk: true, toBlock: Some(toBlock)}) => Some(toBlock)
-        | Some(_) => None // unbounded query -- can't merge
-        | None => Some(p.latestFetchedBlock)
-        }
-        switch potentialMergeBlock {
-        | None => newPartitions->Array.push(p)->ignore
-        | Some(potentialMergeBlock) =>
-          if pAddressesCount >= maxAddrInPartition {
-            newPartitions->Array.push(p)->ignore
-          } else {
-            let partitionsByMergeBlock =
-              mergingPartitions->Utils.Dict.getOrInsertEmptyDict(contractName)
-            switch partitionsByMergeBlock->Utils.Dict.dangerouslyGetByIntNonOption(
-              potentialMergeBlock,
-            ) {
-            | Some(existingPartition) =>
-              let result = mergePartitionsAtBlock(
-                ~p1=existingPartition,
-                ~p2=p,
-                ~potentialMergeBlock,
-                ~contractName,
-                ~maxAddrInPartition,
-                ~nextPartitionIndexRef,
-              )
-              for i in 0 to result->Array.length - 2 {
-                newPartitions->Array.push(result->Array.getUnsafe(i))->ignore
-              }
-              partitionsByMergeBlock->Utils.Dict.setByInt(
+        let contractNames = p.addresses->AddressSet.contractNames
+        if contractNames->Array.length !== 1 || contractNames->Array.getUnsafe(0) !== contractName {
+          newPartitions->Array.push(p)->ignore
+        } else {
+          let pAddressesCount = p.addresses->AddressSet.countFor(contractName)
+          // Compute merge block: last pending query's toBlock, or lfb if idle
+          let potentialMergeBlock = switch p.mutPendingQueries->Utils.Array.last {
+          | Some({isChunk: true, toBlock: Some(toBlock)}) => Some(toBlock)
+          | Some(_) => None // unbounded query -- can't merge
+          | None => Some(p.latestFetchedBlock)
+          }
+          switch potentialMergeBlock {
+          | None => newPartitions->Array.push(p)->ignore
+          | Some(potentialMergeBlock) =>
+            if pAddressesCount >= maxAddrInPartition {
+              newPartitions->Array.push(p)->ignore
+            } else {
+              let partitionsByMergeBlock =
+                mergingPartitions->Utils.Dict.getOrInsertEmptyDict(contractName)
+              switch partitionsByMergeBlock->Utils.Dict.dangerouslyGetByIntNonOption(
                 potentialMergeBlock,
-                result->Utils.Array.lastUnsafe,
-              )
-            | None => partitionsByMergeBlock->Utils.Dict.setByInt(potentialMergeBlock, p)
+              ) {
+              | Some(existingPartition) =>
+                let result = mergePartitionsAtBlock(
+                  ~p1=existingPartition,
+                  ~p2=p,
+                  ~potentialMergeBlock,
+                  ~contractName,
+                  ~maxAddrInPartition,
+                  ~nextPartitionIndexRef,
+                )
+                for i in 0 to result->Array.length - 2 {
+                  newPartitions->Array.push(result->Array.getUnsafe(i))->ignore
+                }
+                partitionsByMergeBlock->Utils.Dict.setByInt(
+                  potentialMergeBlock,
+                  result->Utils.Array.lastUnsafe,
+                )
+              | None => partitionsByMergeBlock->Utils.Dict.setByInt(potentialMergeBlock, p)
+              }
             }
           }
         }
@@ -574,6 +656,11 @@ module OptimizedPartitions = {
       )
       anchored
     }
+
+    let finalPartitions = coalesceAddressBoundPartitions(
+      ~partitions=finalPartitions,
+      ~maxAddrInPartition,
+    )
 
     // Sort partitions by latestFetchedBlock ascending
     let _ = finalPartitions->Array.sort(ascSortFn)
@@ -1943,11 +2030,37 @@ let startFetchingQueries = ({optimizedPartitions}: t, ~queries: array<query>) =>
   }
 }
 
+// Drops one still-in-flight query so the chain slot it reserves is free again,
+// and returns the buffer reservation it carried so the caller can return that
+// too. Its range is not marked fetched: the pending walk finds the hole in
+// front of whatever landed after it and regenerates it as a gap fill on the
+// next tick, so latestFetchedBlock still moves only on a response. A retired
+// partition left with nothing in flight is dropped by the next partition
+// rebuild, exactly as after a landed response. None when there is nothing to
+// release: the response already landed, or a rollback already dropped the
+// queue.
+let releaseInFlightQuery = ({optimizedPartitions}: t, ~partitionId, ~fromBlock) =>
+  switch optimizedPartitions.entities->Dict.get(partitionId) {
+  | None => None
+  | Some(p) =>
+    let idx =
+      p.mutPendingQueries->Array.findIndex(pq =>
+        pq.fromBlock === fromBlock && pq.fetchedBlock === None
+      )
+    if idx === -1 {
+      None
+    } else {
+      let released = p.mutPendingQueries->Array.getUnsafe(idx)
+      p.mutPendingQueries->Array.splice(~start=idx, ~remove=1, ~insert=[])->ignore
+      Some(released.itemsEst)
+    }
+  }
+
 // Most parallel in-flight chunk queries a single partition may have at once.
 // Only queries still being fetched count — a fetched chunk parked behind a gap
 // doesn't hold a slot, so a slow query at the queue head can't starve the
 // partition's pipeline.
-let maxInFlightChunksPerPartition = 12
+let maxInFlightChunksPerPartition = Env.maxPartitionConcurrency
 
 // Most parallel in-flight queries a single chain may have at once, across all
 // its partitions. Bounds source load on chains with many partitions, where the
@@ -1971,6 +2084,7 @@ let pushDensityPricedQuery = (
   ~fromBlock,
   ~toBlock,
   ~isChunk,
+  ~rangeReason,
   ~density,
   ~chainTargetBlock,
   ~selection,
@@ -1984,6 +2098,7 @@ let pushDensityPricedQuery = (
     toBlock,
     selection,
     isChunk,
+    rangeReason,
     itemsTarget: switch toBlock {
     | Some(_) => None
     | None => Some(itemsEst)
@@ -2015,16 +2130,21 @@ let pushGapFillQueries = (
   ~chainTargetBlock: int,
   ~maybeChunkRange: option<int>,
   ~maxChunks: int,
+  ~unblocksFetchedResponse: bool,
   ~partition: partition,
   ~partitionBudget: float,
   ~selection: selection,
   ~addresses: AddressSet.t,
 ) => {
-  // Gaps past the chain's target block wait: they regenerate from the
-  // pending-walk each tick and fill once the target reaches them. The lagged
-  // head is the fetchable ceiling — blocks past knownHeight - blockLag can't
-  // be queried yet.
-  if rangeFromBlock <= Pervasives.min(headBlockNumber, chainTargetBlock) && maxChunks > 0 {
+  // A gap in front of a completed response already retained in memory is
+  // prerequisite work. Do not gate that repair on chainTargetBlock: the target
+  // is a soft buffer horizon derived from the current fully-fetched frontier,
+  // so it may remain below a more-advanced partition's gap forever. Gaps in
+  // front of requests that are still in flight continue to respect the target
+  // to avoid speculative over-fetching. The lagged head remains the hard
+  // fetchable ceiling in both cases.
+  let targetCeiling = unblocksFetchedResponse ? headBlockNumber : chainTargetBlock
+  if rangeFromBlock <= Pervasives.min(headBlockNumber, targetCeiling) && maxChunks > 0 {
     switch rangeEndBlock {
     | Some(endBlock) if rangeFromBlock > endBlock => ()
     | _ =>
@@ -2039,6 +2159,7 @@ let pushGapFillQueries = (
           ~fromBlock=rangeFromBlock,
           ~toBlock=rangeEndBlock,
           ~isChunk,
+          ~rangeReason="gap_fill",
           ~density,
           ~chainTargetBlock,
           ~selection,
@@ -2061,6 +2182,7 @@ let pushGapFillQueries = (
               ~fromBlock=chunkFromBlock.contents,
               ~toBlock=Some(chunkToBlock),
               ~isChunk=true,
+              ~rangeReason="gap_fill",
               ~density,
               ~chainTargetBlock,
               ~selection,
@@ -2134,6 +2256,7 @@ let walkPartitionPending = (
         ~chainTargetBlock,
         ~maybeChunkRange,
         ~maxChunks=maxInFlightChunksPerPartition - inFlightCount - chunksUsedThisCall.contents,
+        ~unblocksFetchedResponse=pq.fetchedBlock !== None,
         ~partition=p,
         ~partitionBudget,
         ~selection=p.selection,
@@ -2189,6 +2312,9 @@ let walkPartitionPending = (
 // ~nothing, so an open-ended probe (full server scan range in one response)
 // beats a pipeline of hard-bounded chunks that crawl chunkRangeGrowthFactor×
 // per two responses.
+let getSourceBlocksPerRequest = (~isRealtime, ~configured) =>
+  isRealtime ? None : configured
+
 let pushForwardCandidates = (
   candidates: array<query>,
   // May be truncated to the chain's free concurrency slots — a pure generation
@@ -2199,8 +2325,10 @@ let pushForwardCandidates = (
   // budget control — sizing by the (fewer) admittable queries would let every
   // accepted probe over-fetch its share.
   ~inRangeCount: int,
+  ~headBlockNumber: int,
   ~chainTargetBlock: int,
   ~freshBudget: float,
+  ~sourceBlocksPerRequest,
 ) => {
   // Even share of the fresh budget across the partitions actually fetching
   // this tick (not every partition — so budget isn't stranded on ones below
@@ -2220,13 +2348,23 @@ let pushForwardCandidates = (
 
   inRangeStates->Array.forEach(fs => {
     let p = fs.p
-    let maxBlock = switch fs.queryEndBlock {
-    | Some(eb) => eb
-    | None => chainTargetBlock
+    let maxBlock = switch (fs.queryEndBlock, sourceBlocksPerRequest) {
+    | (Some(eb), _) => eb
+    | (None, Some(_)) => headBlockNumber
+    | (None, None) => chainTargetBlock
     }
-    switch (fs.maybeChunkRange, p->getTrustedDensity) {
-    | (Some(minHistoryRange), Some(density)) if density > 0. =>
-      let chunkSize = Js.Math.ceil_int(minHistoryRange->Int.toFloat *. chunkRangeGrowthFactor)
+    let chunkPlan = switch sourceBlocksPerRequest {
+    | Some(blocks) =>
+      Some((blocks, p->getTrustedDensity->Option.getOr(Pervasives.max(1., rangeTargetDensity))))
+    | None =>
+      switch (fs.maybeChunkRange, p->getTrustedDensity) {
+      | (Some(minHistoryRange), Some(density)) if density > 0. =>
+        Some((Js.Math.ceil_int(minHistoryRange->Int.toFloat *. chunkRangeGrowthFactor), density))
+      | _ => None
+      }
+    }
+    switch chunkPlan {
+    | Some((chunkSize, density)) =>
       let maxChunksRemaining =
         maxInFlightChunksPerPartition - fs.inFlightCount - fs.chunksUsedThisCall
       // No chunk starts past chainTargetBlock; an emitted chunk still keeps
@@ -2247,12 +2385,22 @@ let pushForwardCandidates = (
         generatedItems.contents <= freshBudget
       ) {
         let chunkToBlock = Pervasives.min(chunkFromBlock.contents + chunkSize - 1, maxBlock)
+        let rangeReason = if chunkToBlock - chunkFromBlock.contents + 1 === chunkSize {
+          "full_range"
+        } else {
+          switch (p.mergeBlock, fs.queryEndBlock) {
+          | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => "merge_boundary"
+          | (_, Some(_)) => "end_boundary"
+          | _ => "full_range"
+          }
+        }
         let itemsEst =
           candidates->pushDensityPricedQuery(
             ~partitionId=fs.partitionId,
             ~fromBlock=chunkFromBlock.contents,
             ~toBlock=Some(chunkToBlock),
             ~isChunk=true,
+            ~rangeReason,
             ~density,
             ~chainTargetBlock,
             ~selection=p.selection,
@@ -2286,6 +2434,11 @@ let pushForwardCandidates = (
         fromBlock: fs.cursor,
         toBlock: fs.queryEndBlock,
         isChunk: false,
+        rangeReason: switch (p.mergeBlock, fs.queryEndBlock) {
+        | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => "merge_boundary"
+        | (_, Some(_)) => "end_boundary"
+        | _ => "adaptive"
+        },
         selection: p.selection,
         // An open-ended probe's range isn't bounded to source capacity, so it
         // keeps a server cap at its estimate to protect the shared buffer.
@@ -2298,68 +2451,137 @@ let pushForwardCandidates = (
   })
 }
 
-// Acceptance: merge fresh candidates (Some) with the in-flight reservations
-// (None) and walk them in fromBlock order, starting from the full
-// chainTargetItems. A reservation just draws down the budget — its query is
-// already sent — while a candidate draws down the budget and is emitted.
-// Because a gap-fill's fromBlock precedes the in-flight query it unblocks,
-// it claims budget ahead of that reservation, so the buffer never deadlocks
-// waiting on a hole it can't fund. The candidate that tips the budget
-// negative is still emitted (a single overshoot); everything after it waits
-// for a tick with more budget. Accepted queries route back to their
-// partition bucket, so the output stays in idsInAscOrder with each
-// partition's queries in fromBlock order.
+let makeSchedulerPartitionSnapshot = (partitionId, p: partition) => {
+  let inFlightQueries = ref(0)
+  let fetchedPendingQueries = ref(0)
+  p.mutPendingQueries->Array.forEach(pendingQuery =>
+    switch pendingQuery.fetchedBlock {
+    | Some(_) => fetchedPendingQueries := fetchedPendingQueries.contents + 1
+    | None => inFlightQueries := inFlightQueries.contents + 1
+    }
+  )
+  let snapshot: RuntimeHooks.fetchSchedulerPartitionSnapshot = {
+    partitionId,
+    frontierBlock: p.latestFetchedBlock,
+    pendingQueries: p.mutPendingQueries->Array.length,
+    inFlightQueries: inFlightQueries.contents,
+    fetchedPendingQueries: fetchedPendingQueries.contents,
+    nextPendingFromBlock: p.mutPendingQueries->Array.get(0)->Option.map(q => q.fromBlock),
+  }
+  snapshot
+}
+
+// Select fresh work in partition-fair rounds before the block-ordered budget
+// pass. A partition's second chunk must not occupy a chain slot while another
+// runnable partition has not received its first. Within a round the oldest
+// cursor still wins, preserving the frontier-first policy. This matters when
+// partitions have staggered frontiers: sorting every generated chunk only by
+// fromBlock lets a handful of lagging partitions fill the entire chain
+// concurrency cap and indefinitely delay dynamic-address partitions.
+let selectFairCandidates = (
+  ~candidates: array<query>,
+  ~availableConcurrency: int,
+  ~inFlightCountByPartition: dict<int>,
+) => {
+  // A gap-fill repairs range that another response depends on. Keep the oldest
+  // repairs ahead of ordinary fairness so acceptCandidates can use the bounded
+  // prerequisite-borrow slot when reservations exhaust the budget. If fairness
+  // sliced them away first, a fully reserved budget could deadlock even though
+  // the chain still had a free concurrency slot.
+  let gapCandidates = candidates->Array.filter(query => query.rangeReason === "gap_fill")
+  gapCandidates->Array.sort((a, b) => Int.compare(a.fromBlock, b.fromBlock))
+  let selectedGapCandidates = gapCandidates->Array.slice(
+    ~start=0,
+    ~end=Pervasives.max(0, availableConcurrency),
+  )
+  let remainingConcurrency = availableConcurrency - selectedGapCandidates->Array.length
+
+  let nextRoundByPartition = Dict.make()
+  let ranked = candidates
+  ->Array.filter(query => query.rangeReason !== "gap_fill")
+  ->Array.map(query => {
+    let round = nextRoundByPartition->Dict.get(query.partitionId)->Option.getOr(0)
+    nextRoundByPartition->Dict.set(query.partitionId, round + 1)
+    let ownedSlots = inFlightCountByPartition->Dict.get(query.partitionId)->Option.getOr(0)
+    (ownedSlots + round, query)
+  })
+  ranked->Array.sort(((aRound, a), (bRound, b)) =>
+    if aRound !== bRound {
+      Int.compare(aRound, bRound)
+    } else {
+      Int.compare(a.fromBlock, b.fromBlock)
+    }
+  )
+  selectedGapCandidates->Array.concat(
+    ranked
+    ->Array.slice(~start=0, ~end=Pervasives.max(0, remainingConcurrency))
+    ->Array.map(((_, query)) => query),
+  )
+}
+
+// Acceptance: charge every in-flight reservation before admitting fresh work,
+// then walk gap fills first and each class in fromBlock order. A candidate that
+// tips the fresh budget negative is still emitted (a single overshoot). When
+// reservations already exhaust the budget, at most one prerequisite gap may
+// borrow so the dependent response cannot remain stranded. Accepted queries
+// route back to their partition bucket, preserving idsInAscOrder and each
+// partition's fromBlock order.
 let acceptCandidates = (
   ~candidates: array<query>,
   ~reservations: array<(int, int)>,
   ~chainTargetItems: float,
   ~partitionIndexById: dict<int>,
   ~queriesByPartitionIndex: array<array<query>>,
+  ~maxChainConcurrency: int,
 ) => {
-  let acceptanceStream = []
-  candidates->Array.forEach(query =>
-    acceptanceStream->Array.push((query.fromBlock, query.itemsEst, Some(query)))->ignore
-  )
-  reservations->Array.forEach(((fromBlock, itemsEst)) =>
-    acceptanceStream->Array.push((fromBlock, itemsEst, None))->ignore
-  )
-  // Sort by fromBlock; on a tie charge the in-flight reservation (None) before
-  // a fresh candidate (Some), so a same-block candidate can't overshoot the
-  // target buffer. Only a strictly-earlier candidate — a gap-fill, whose
-  // fromBlock precedes the query it unblocks — borrows ahead of a reservation.
-  acceptanceStream->Array.sort(((aFrom, _, aQuery), (bFrom, _, bQuery)) =>
-    if aFrom !== bFrom {
-      Int.compare(aFrom, bFrom)
-    } else {
-      switch (aQuery, bQuery) {
-      | (None, Some(_)) => Ordering.less
-      | (Some(_), None) => Ordering.greater
-      | (None, None) | (Some(_), Some(_)) => Ordering.equal
-      }
-    }
-  )
-  let streamCount = acceptanceStream->Array.length
+  // Reservations are work already sent, so account for them before admitting
+  // anything fresh. Gap fills still lead the fresh queue because another
+  // response depends on each hole, but a fully reserved tick may borrow for at
+  // most one gap. This preserves liveness without multiplying buffer pressure.
   let remainingBudget = ref(chainTargetItems)
-  let acceptIdx = ref(0)
-  // In-flight queries count against the chain's concurrency cap alongside the
-  // ones accepted this tick; once the cap is reached no later candidate can be
-  // accepted (they're only later in fromBlock order), so the walk stops.
-  let usedConcurrency = ref(reservations->Array.length)
-  while (
-    remainingBudget.contents > 0. &&
-    acceptIdx.contents < streamCount &&
-    usedConcurrency.contents < maxChainConcurrency
-  ) {
-    let (_, itemsEst, maybeQuery) = acceptanceStream->Array.getUnsafe(acceptIdx.contents)
-    switch maybeQuery {
-    | Some(query) =>
-      let partitionIdx = partitionIndexById->Dict.getUnsafe(query.partitionId)
-      queriesByPartitionIndex->Array.getUnsafe(partitionIdx)->Array.push(query)->ignore
-      usedConcurrency := usedConcurrency.contents + 1
-    | None => ()
-    }
+  let earliestReservationBlock = ref(None)
+  reservations->Array.forEach(((fromBlock, itemsEst)) => {
     remainingBudget := remainingBudget.contents -. itemsEst->Int.toFloat
-    acceptIdx := acceptIdx.contents + 1
+    earliestReservationBlock := switch earliestReservationBlock.contents {
+    | Some(earliest) => Some(Pervasives.min(earliest, fromBlock))
+    | None => Some(fromBlock)
+    }
+  })
+
+  candidates->Array.sort((a, b) => {
+    let aPriority = a.rangeReason === "gap_fill" ? 0 : 1
+    let bPriority = b.rangeReason === "gap_fill" ? 0 : 1
+    aPriority !== bPriority
+      ? Int.compare(aPriority, bPriority)
+      : Int.compare(a.fromBlock, b.fromBlock)
+  })
+
+  let candidateCount = candidates->Array.length
+  let candidateIdx = ref(0)
+  let borrowedFreshBudget = ref(false)
+  let usedConcurrency = ref(reservations->Array.length)
+  let canBorrowFreshBudget = query =>
+    !borrowedFreshBudget.contents &&
+    (query.rangeReason === "gap_fill" ||
+    switch earliestReservationBlock.contents {
+    | Some(fromBlock) => query.fromBlock < fromBlock
+    | None => false
+    })
+  while (
+    candidateIdx.contents < candidateCount &&
+    usedConcurrency.contents < maxChainConcurrency &&
+    (remainingBudget.contents > 0. ||
+    canBorrowFreshBudget(candidates->Array.getUnsafe(candidateIdx.contents)))
+  ) {
+    let query = candidates->Array.getUnsafe(candidateIdx.contents)
+    let partitionIdx = partitionIndexById->Dict.getUnsafe(query.partitionId)
+    queriesByPartitionIndex->Array.getUnsafe(partitionIdx)->Array.push(query)->ignore
+    usedConcurrency := usedConcurrency.contents + 1
+    remainingBudget := remainingBudget.contents -. query.itemsEst->Int.toFloat
+    if remainingBudget.contents < 0. {
+      borrowedFreshBudget := true
+    }
+    candidateIdx := candidateIdx.contents + 1
   }
 }
 
@@ -2375,14 +2597,18 @@ let acceptCandidates = (
 // non-positive budget only resolves the wait action and generates no query
 // candidates. With a positive budget, every candidate query — gap-fill holes,
 // plus each in-range partition's chunks or open-ended probe toward the target —
-// is generated with no budget check, then the candidates are sorted by
-// fromBlock and accepted in that order while the budget stays positive. The
-// query that tips it negative is still accepted (a single overshoot);
+// is generated with no budget check, then gap fills are accepted first and
+// remaining work is accepted in fromBlock order while the budget stays
+// positive. The query that tips it negative is still accepted (a single
+// overshoot);
 // everything after it waits for a tick with more budget.
-// Sorting by fromBlock spends the budget on the earliest blocks across all
-// partitions first, so no partition is starved by generation order and the
-// frontier advances evenly. In-flight reservations release as responses land,
-// so acceptance redistributes across ticks.
+// Fresh candidates are first selected in partition-fair rounds, oldest cursor
+// first within each round. After reservations are charged, selected work is
+// budgeted gap-first and in fromBlock order within each class. This keeps the
+// frontier preference
+// without letting one partition's deeper pipeline consume every chain slot.
+// In-flight reservations release as responses land, so acceptance redistributes
+// across ticks.
 //
 // A partition with source-capacity history and a positive density generates
 // density-sized chunks toward the target. Any other partition (no signal, no
@@ -2391,10 +2617,28 @@ let acceptCandidates = (
 // rangeTargetDensity × (chainTargetBlock − fromBlock + 1) / inRangeCount — so
 // unknown-density partitions probe in parallel within one budget.
 let getNextQuery = (
-  {optimizedPartitions, blockLag, latestOnBlockBlockNumber, knownHeight, endBlock}: t,
+  {
+    optimizedPartitions,
+    blockLag,
+    latestOnBlockBlockNumber,
+    knownHeight,
+    endBlock,
+    buffer,
+  } as fetchState: t,
   ~chainTargetBlock: int,
   ~chainTargetItems: float,
+  ~isRealtime=false,
+  ~configuredSourceBlocksPerRequest=Env.sourceBlocksPerRequest,
+  ~hyperSyncHeadPollBlocks=Env.hyperSyncHeadPollBlocks,
+  ~willQueryHyperSync=false,
+  // Injectable so the scheduler's fairness and liveness can be tested at any
+  // concurrency without re-reading the environment.
+  ~maxChainConcurrency=maxChainConcurrency,
 ) => {
+  let sourceBlocksPerRequest = getSourceBlocksPerRequest(
+    ~isRealtime,
+    ~configured=configuredSourceBlocksPerRequest,
+  )
   let headBlockNumber = knownHeight - blockLag
   if headBlockNumber <= 0 {
     WaitingForNewBlock
@@ -2419,10 +2663,10 @@ let getNextQuery = (
     // lingers in mutPendingQueries behind an unfilled gap, so counting it would
     // understate the budget and hold a concurrency slot it no longer uses.
     let inFlightCounts = Utils.Array.jsArrayCreate(partitionsCount)
-    // (fromBlock, itemsEst) of each still-in-flight query. The acceptance pass
-    // merges these into the candidate stream and draws them down in fromBlock
-    // order, so a gap-fill sitting before an in-flight query claims budget ahead
-    // of it and the buffer unblocks without waiting for that query to return.
+    let inFlightCountByPartition = Dict.make()
+    // (fromBlock, itemsEst) for each still-in-flight query. Admission charges
+    // every reservation before fresh work, while fromBlock preserves the bounded
+    // borrow allowed for an older candidate that must run first.
     let reservations = []
     // In-flight itemsEst summed over the reservations. Sizes fresh forward
     // work below.
@@ -2444,6 +2688,7 @@ let getNextQuery = (
         }
       }
       inFlightCounts->Array.setUnsafe(idx, inFlightCount.contents)
+      inFlightCountByPartition->Dict.set(partitionId, inFlightCount.contents)
       if p.mutPendingQueries->Array.length > 0 || p.latestFetchedBlock < headBlockNumber {
         // Even if there are some partitions waiting for the new block
         // We still want to wait for all partitions reaching the head
@@ -2487,11 +2732,9 @@ let getNextQuery = (
 
     // Every candidate query for this tick — gap-fill holes plus each in-range
     // partition's chunks/probe toward the target — generated with no budget
-    // check, then merged with the in-flight reservations, sorted by fromBlock,
-    // and accepted while the budget lasts (acceptCandidates). Selecting by
-    // fromBlock spends the budget on the earliest blocks across all partitions
-    // first, so no partition is starved by iteration order and the frontier
-    // advances evenly.
+    // check, selected in one-candidate-per-partition rounds, then merged with
+    // the in-flight reservations and accepted while the budget lasts
+    // (acceptCandidates). Within each fair round the oldest cursor wins.
     let candidates = []
 
     // Each partition's equal-divide share of the tick's budget, used to price
@@ -2530,7 +2773,14 @@ let getNextQuery = (
       } &&
       fs.inFlightCount + fs.chunksUsedThisCall < maxInFlightChunksPerPartition
 
-    let inRangeStates = fillStates->Array.filter(isInRange)
+    // At realtime, coalesce only HyperSync forward-head work. Backfill, finite
+    // ranges, RPC realtime, gap fills, and in-flight work remain unchanged.
+    let shouldCoalesceHyperSyncHead =
+      isRealtime && willQueryHyperSync && endBlock->Option.isNone && hyperSyncHeadPollBlocks > 1
+    let inRangeStates = fillStates->Array.filter(fs =>
+      isInRange(fs) &&
+      (!shouldCoalesceHyperSyncHead || headBlockNumber - fs.cursor + 1 >= hyperSyncHeadPollBlocks)
+    )
     let inRangeCount = inRangeStates->Array.length
     // The acceptance pass admits at most availableConcurrency fresh queries, in
     // fromBlock order, and every kept partition contributes a candidate at its
@@ -2541,7 +2791,13 @@ let getNextQuery = (
     // generation bound: sizing still divides by the full inRangeCount, so each
     // probe keeps its honest per-partition share of the budget.
     let inRangeStates = if inRangeCount > availableConcurrency {
-      inRangeStates->Array.sort((a, b) => Int.compare(a.cursor, b.cursor))
+      inRangeStates->Array.sort((a, b) =>
+        if a.inFlightCount !== b.inFlightCount {
+          Int.compare(a.inFlightCount, b.inFlightCount)
+        } else {
+          Int.compare(a.cursor, b.cursor)
+        }
+      )
       inRangeStates->Array.slice(~start=0, ~end=availableConcurrency)
     } else {
       inRangeStates
@@ -2550,22 +2806,36 @@ let getNextQuery = (
     candidates->pushForwardCandidates(
       ~inRangeStates,
       ~inRangeCount,
+      ~headBlockNumber,
       ~chainTargetBlock,
       ~freshBudget,
+      ~sourceBlocksPerRequest,
+    )
+
+    let selectedCandidates = selectFairCandidates(
+      ~candidates,
+      ~availableConcurrency,
+      ~inFlightCountByPartition,
     )
 
     acceptCandidates(
-      ~candidates,
+      ~candidates=selectedCandidates,
       ~reservations,
       ~chainTargetItems,
       ~partitionIndexById,
       ~queriesByPartitionIndex,
+      ~maxChainConcurrency,
     )
 
     let queries = queriesByPartitionIndex->Array.flat
 
-    if queries->Utils.Array.isEmpty {
-      if shouldWaitForNewBlock.contents {
+    let action = if queries->Utils.Array.isEmpty {
+      if (
+        shouldWaitForNewBlock.contents ||
+        (shouldCoalesceHyperSyncHead &&
+        reservations->Array.length === 0 &&
+        candidates->Array.length === 0)
+      ) {
         WaitingForNewBlock
       } else {
         NothingToQuery
@@ -2573,6 +2843,37 @@ let getNextQuery = (
     } else {
       Ready(queries)
     }
+
+    try {
+      RuntimeHooks.recordFetchScheduler(() => {
+        let partitions = optimizedPartitions.idsInAscOrder->Array.map(partitionId =>
+          makeSchedulerPartitionSnapshot(
+            partitionId,
+            optimizedPartitions.entities->Dict.getUnsafe(partitionId),
+          )
+        )
+        let decision = switch action {
+        | Ready(_) => "ready"
+        | NothingToQuery => "nothing_to_query"
+        | WaitingForNewBlock => "waiting_for_new_block"
+        }
+        {
+          knownHeight,
+          bufferBlock: fetchState->bufferBlockNumber,
+          bufferSize: buffer->Array.length,
+          bufferReadyCount: fetchState->bufferReadyCount,
+          pendingBudget: chainReserved.contents->Float.toInt,
+          availableConcurrency: Pervasives.max(0, availableConcurrency),
+          candidateQueries: candidates->Array.length,
+          acceptedQueries: queries->Array.length,
+          decision,
+          partitions,
+        }
+      })
+    } catch {
+    | _ => ()
+    }
+    action
   }
 }
 
