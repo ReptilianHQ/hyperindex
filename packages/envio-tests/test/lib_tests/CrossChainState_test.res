@@ -92,6 +92,8 @@ let makeFetchingChainState = (
   ~bufferBlocks=[],
   ~firstEventBlock=Some(0),
   ~blockLag=0,
+  ~sourceRangeCapacity=0,
+  ~eventDensity=None,
 ) => {
   let normalSelection = {FetchState.dependsOnAddresses: false, onEventRegistrations: []}
   let address = "0x1234567890123456789012345678901234567890"->Address.unsafeFromString
@@ -103,9 +105,9 @@ let makeFetchingChainState = (
     mergeBlock: None,
     dynamicContract: None,
     mutPendingQueries: [],
-    sourceRangeCapacity: 0,
-    prevSourceRangeCapacity: 0,
-    eventDensity: None,
+    sourceRangeCapacity,
+    prevSourceRangeCapacity: sourceRangeCapacity,
+    eventDensity,
     latestSourceRangeCapacityUpdateBlock: 0,
   }
   let addressStore = TestAddresses.makeStore(
@@ -162,12 +164,23 @@ let emptyBatch: Batch.t = {
   registeredAddresses: [],
 }
 
-let makeCrossChainState = (~chainStatesList, ~isRealtime=false, ~targetBufferSize=100) => {
+let makeCrossChainState = (
+  ~chainStatesList,
+  ~isRealtime=false,
+  ~targetBufferSize=100,
+  ~sourceBlocksPerRequest=?,
+) => {
   let chainStates = Dict.make()
   chainStatesList->Array.forEach(cs =>
     chainStates->ChainId.Dict.set((cs->ChainState.chainConfig).id, cs)
   )
-  CrossChainState.make(~chainStates, ~isInReorgThreshold=false, ~isRealtime, ~targetBufferSize)
+  CrossChainState.make(
+    ~chainStates,
+    ~isInReorgThreshold=false,
+    ~isRealtime,
+    ~targetBufferSize,
+    ~sourceBlocksPerRequest?,
+  )
 }
 
 let makeRegistration = (~contractName, ~index): Internal.onEventRegistration =>
@@ -841,6 +854,39 @@ describe("ChainState cold start", () => {
     ).toEqual(Some(5000))
   })
 
+  Async.it("passes realtime mode through to fixed-range planning", async t => {
+    let ranges = async (~isRealtime) => {
+      let cs = makeFetchingChainState(
+        ~chainId=1->ChainId.fromInt,
+        ~knownHeight=125,
+        ~latestFetchedBlock=100,
+        ~sourceRangeCapacity=100,
+        ~eventDensity=Some(10.),
+      )
+      let cm = makeCrossChainState(
+        ~chainStatesList=[cs],
+        ~isRealtime,
+        ~targetBufferSize=10_000,
+        ~sourceBlocksPerRequest=Some(100),
+      )
+      let dispatched = ref([])
+      await cm->CrossChainState.checkAndFetch(~dispatchChain=(~chainId as _, ~action) => {
+        dispatched := switch action {
+        | Ready(queries) =>
+          queries->Array.map((q: FetchState.query) => (q.fromBlock, q.toBlock))
+        | WaitingForNewBlock | NothingToQuery => []
+        }
+        Promise.resolve()
+      })
+      dispatched.contents
+    }
+
+    t.expect({
+      "backfill": await ranges(~isRealtime=false),
+      "realtime": await ranges(~isRealtime=true),
+    }).toEqual({"backfill": [(101, Some(125))], "realtime": [(101, Some(125))]})
+  })
+
   Async.it("gives a cold chain one 10% admission unit", async t => {
     let probeSize = async (~targetBufferSize) => {
       let cs = makeFetchingChainState(~chainId=1->ChainId.fromInt, ~knownHeight=1_000_000, ~latestFetchedBlock=0)
@@ -1006,5 +1052,67 @@ describe("ChainState density from the ready buffer", () => {
       ~bufferBlocks=[50],
     )
     t.expect(cs->ChainState.effectiveDensity).toEqual(Some(1. /. 101.))
+  })
+})
+
+describe("ChainState.releaseInFlightQuery", () => {
+  it("returns the buffer reservation the query took, once", t => {
+    // The pair startFetchingQueries adds must come back on release, or every
+    // exhausted query leaks its estimate into pendingBudget for the life of
+    // the process until admission reads the pool as saturated with nothing in
+    // flight.
+    let cs = makeFetchingChainState(
+      ~chainId=1->ChainId.fromInt,
+      ~knownHeight=100_000,
+      ~latestFetchedBlock=1_000,
+    )
+    let queries = switch cs->ChainState.getNextQuery(~chainTargetItems=3000.) {
+    | Ready(queries) => queries
+    | _ => JsError.throwWithMessage("expected a Ready query")
+    }
+    let query = queries->Array.getUnsafe(0)
+    let before = cs->ChainState.pendingBudget
+    cs->ChainState.startFetchingQueries(~queries)
+    let reserved = cs->ChainState.pendingBudget
+    let released = cs->ChainState.releaseInFlightQuery(~query)
+    let after = cs->ChainState.pendingBudget
+    let releasedAgain = cs->ChainState.releaseInFlightQuery(~query)
+    let afterAgain = cs->ChainState.pendingBudget
+    t.expect({
+      "before": before,
+      "reserved": reserved,
+      "released": released,
+      "after": after,
+      "releasedAgain": releasedAgain,
+      "afterAgain": afterAgain,
+    }).toEqual({
+      "before": 0.,
+      "reserved": queries->Array.reduce(0., (acc, q) => acc +. q.itemsEst->Int.toFloat),
+      "released": true,
+      "after": reserved -. query.itemsEst->Int.toFloat,
+      "releasedAgain": false,
+      "afterAgain": reserved -. query.itemsEst->Int.toFloat,
+    })
+  })
+
+  it("never drives the budget negative", t => {
+    // A rollback resets the budget to zero and drops in-flight queries; a late
+    // release for one of them finds nothing and must not subtract.
+    let cs = makeFetchingChainState(
+      ~chainId=1->ChainId.fromInt,
+      ~knownHeight=100_000,
+      ~latestFetchedBlock=1_000,
+    )
+    let queries = switch cs->ChainState.getNextQuery(~chainTargetItems=3000.) {
+    | Ready(queries) => queries
+    | _ => JsError.throwWithMessage("expected a Ready query")
+    }
+    cs->ChainState.startFetchingQueries(~queries)
+    cs->ChainState.resetPendingQueries
+    let released = cs->ChainState.releaseInFlightQuery(~query=queries->Array.getUnsafe(0))
+    t.expect({"released": released, "budget": cs->ChainState.pendingBudget}).toEqual({
+      "released": false,
+      "budget": 0.,
+    })
   })
 })

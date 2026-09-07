@@ -205,6 +205,9 @@ let partitions = (optimizedPartitions: FetchState.OptimizedPartitions.t) => {
 
 let query = (q: FetchState.query): FetchState.query => {
   ...q,
+  // Query provenance is validated separately; normalize it out of the older
+  // structural expectations this helper serves.
+  rangeReason: "test",
   addresses: q.addresses->comparable,
 }
 

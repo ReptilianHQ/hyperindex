@@ -17,6 +17,7 @@ interface TemplateConfig {
   name: string;
   initArgs: string[];
   hasTests?: boolean;
+  offlineTestPattern?: string;
 }
 
 const fuelGreeterAbi = path.join(config.rootDir, "packages/e2e-tests/fixtures/fuel-greeter-abi.json");
@@ -33,6 +34,7 @@ const TEMPLATES: TemplateConfig[] = [
     name: "evm-erc20",
     initArgs: ["template", "-t", "erc20", "-l", "typescript"],
     hasTests: true,
+    offlineTestPattern: "Transfer subtracts",
   },
   {
     name: "evm-factory",
@@ -65,6 +67,7 @@ const TEMPLATES: TemplateConfig[] = [
   {
     name: "evm-contract-import-ts",
     hasTests: true,
+    offlineTestPattern: "handler creates",
     initArgs: [
       "contract-import",
       "-c",
@@ -81,6 +84,7 @@ const TEMPLATES: TemplateConfig[] = [
   {
     name: "evm-contract-import-rescript",
     hasTests: true,
+    offlineTestPattern: "handler creates",
     initArgs: [
       "contract-import",
       "-c",
@@ -140,7 +144,7 @@ const TEMPLATES: TemplateConfig[] = [
   },
 ];
 
-function templateTest({ name, initArgs, hasTests }: TemplateConfig) {
+function templateTest({ name, initArgs, hasTests, offlineTestPattern }: TemplateConfig) {
   let projectDir: string;
 
   beforeAll(async () => {
@@ -189,7 +193,10 @@ function templateTest({ name, initArgs, hasTests }: TemplateConfig) {
   }, config.timeouts.codegen + 30_000);
 
   it.skipIf(!hasTests)("runs tests successfully", async () => {
-    const result = await runCommand("pnpm", ["test"], {
+    const testArgs = offlineTestPattern
+      ? ["test", "--testNamePattern", offlineTestPattern]
+      : ["test"];
+    const result = await runCommand("pnpm", testArgs, {
       cwd: projectDir,
       timeout: config.timeouts.test,
     });

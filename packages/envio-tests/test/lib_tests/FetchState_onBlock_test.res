@@ -6,6 +6,7 @@ let chainId = 0->ChainId.fromInt
 // every other field is overridden at the call site.
 let defaultQuery: FetchState.query = {
   partitionId: "0",
+  rangeReason: "test",
   fromBlock: 0,
   toBlock: None,
   isChunk: false,
@@ -104,6 +105,7 @@ describe("FetchState onBlock functionality", () => {
     // This should trigger the onBlock logic and add block items to the queue
     let query: FetchState.query = {
       partitionId: "0",
+      rangeReason: "test",
       itemsTarget: Some(0),
       itemsEst: 0,
       toBlock: None,
@@ -151,6 +153,7 @@ describe("FetchState onBlock functionality", () => {
     // Process a batch that goes from block 0 to 10
     let query: FetchState.query = {
       partitionId: "0",
+      rangeReason: "test",
       itemsTarget: Some(0),
       itemsEst: 0,
       toBlock: None,
@@ -199,6 +202,7 @@ describe("FetchState onBlock functionality", () => {
     // Process a batch that goes from block 0 to 10
     let query: FetchState.query = {
       partitionId: "0",
+      rangeReason: "test",
       itemsTarget: Some(0),
       itemsEst: 0,
       toBlock: None,
@@ -251,6 +255,7 @@ describe("FetchState onBlock functionality", () => {
     // Process a batch
     let query: FetchState.query = {
       partitionId: "0",
+      rangeReason: "test",
       itemsTarget: Some(0),
       itemsEst: 0,
       toBlock: None,
@@ -306,6 +311,7 @@ describe("FetchState onBlock functionality", () => {
     // Process a batch
     let query: FetchState.query = {
       partitionId: "0",
+      rangeReason: "test",
       itemsTarget: Some(0),
       itemsEst: 0,
       toBlock: None,

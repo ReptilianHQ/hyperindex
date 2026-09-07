@@ -1524,39 +1524,38 @@ describe("E2E tests", () => {
         ~message="each dynamic contract fetches from its own registration block, in its own partition",
       ).toEqual(([5000, 25100, 25101], true, true))
 
-      // Advance DC2 a little. Its partition stays separate while DC1 is still
-      // more than tooFarBlockRange behind it.
+      // The fork coalesces at registration time instead of merging later: DC2's
+      // partition carries both dynamic addresses from its own frontier on, and
+      // DC1's partition is bounded to retire just before DC2's coverage begins,
+      // so the two never fetch the same range and no third partition is made.
+      let addressCount = fromBlock =>
+        callAt(fromBlock).payload->MockSource.CallPayload.addresses->Array.length
+      t.expect(
+        (callAt(5000).payload["toBlock"], addressCount(5000), addressCount(25100)),
+        ~message="DC1 is bounded before DC2's registration block; DC2 already carries both addresses",
+      ).toEqual((Some(25099), 1, 2))
+
+      // Advance DC2 a little, then let DC1 catch up part of the way. DC1 keeps
+      // walking its own bounded range; nothing merges into a new partition.
       callAt(25100).resolve([{blockNumber: 25200, logIndex: 0}], ~latestFetchedBlockNumber=25600)
       await Utils.delay(0)
       await Utils.delay(0)
       await Utils.delay(0)
-
-      // DC1 catches up to block 12500. DC2's merge block is now within
-      // tooFarBlockRange of it, so the two dynamic-contract partitions merge
-      // into one that carries both addresses.
       callAt(5000).resolve([], ~latestFetchedBlockNumber=12500)
-      await Scenario.waitUntil(
-        () =>
-          sourceMock.getItemsOrThrowCalls->Array.some(
-            c => c.payload->MockSource.CallPayload.addresses->Array.length === 2,
-          ),
-        ~message="a partition holding both dynamic-contract addresses",
-      )
+      await Utils.delay(0)
+      await Utils.delay(0)
+      await Utils.delay(0)
 
-      let merged =
+      let twoAddressPartitions =
         sourceMock.getItemsOrThrowCalls
         ->Array.filter(c => c.payload->MockSource.CallPayload.addresses->Array.length === 2)
         ->Array.map(c => c.payload["p"])
         ->Utils.Set.fromArray
         ->Utils.Set.toArray
       t.expect(
-        (
-          merged->Array.length,
-          merged->Array.get(0) != dc1Partition,
-          merged->Array.get(0) != dc2Partition,
-        ),
-        ~message="the merge produces a single new partition, not a reuse of either input",
-      ).toEqual((1, true, true))
+        (partitionAt(12501), twoAddressPartitions),
+        ~message="DC1 continues its bounded range in its own partition; only DC2's partition carries both addresses",
+      ).toEqual((dc1Partition, [dc2Partition->Option.getOrThrow]))
     },
   )
 

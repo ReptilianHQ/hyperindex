@@ -62,7 +62,7 @@ if (!dockerAvailable && process.env.CI) {
   );
 }
 
-describe.skipIf(!dockerAvailable)("E2E: Indexer with GraphQL and ClickHouse sink", () => {
+describe.skipIf(!dockerAvailable || !process.env.ENVIO_API_TOKEN)("E2E: Indexer with GraphQL and ClickHouse sink", () => {
   let indexerProcess: ChildProcess | null = null;
   let graphql: GraphQLClient;
   let metricsWhileRunning: MetricsResult | null = null;

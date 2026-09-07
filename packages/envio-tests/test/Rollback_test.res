@@ -982,29 +982,18 @@ describe("E2E rollback tests", () => {
 
       await indexer.getBatchWritePromise()
 
+      t.expect(calls).toEqual(["101-0"])
+      // The fork pipelines several bounded chunks per partition and coalesces
+      // caught-up address partitions, so the pending set is described by what
+      // it must contain rather than listed exactly.
+      let initialPayloads = sourceMock.getItemsOrThrowCalls->Array.map(c => c.payload)
       t.expect(
-        (calls, sourceMock.getItemsOrThrowCalls->Array.map(c => c.payload)),
+        (
+          initialPayloads->Array.some(p => p["p"] !== "0" && p["fromBlock"] === 102),
+          initialPayloads->Array.some(p => p["p"] === "0" && p["fromBlock"] === 105),
+        ),
         ~message=`Creates a new partition for DCs and queries it in parallel with the original partition without blocking`,
-      ).toEqual((
-        ["101-0"],
-        [
-          {
-            // New partition for DCs
-            "fromBlock": 102,
-            "toBlock": None,
-            "retry": 0,
-            "p": "1",
-          },
-          {
-            // Continue fetching original partition
-            // without blocking
-            "fromBlock": 105,
-            "toBlock": None,
-            "retry": 0,
-            "p": "0",
-          },
-        ],
-      ))
+      ).toEqual((true, true))
       t.expect(
         await queryDynamicAddresses(indexer),
         ~message="Shouldn't store dynamic contracts at this point",
@@ -1023,25 +1012,15 @@ describe("E2E rollback tests", () => {
       )
       await indexer.getBatchWritePromise()
       t.expect(
-        (calls, sourceMock.getItemsOrThrowCalls->Array.map(c => c.payload)),
+        calls,
         ~message=`Should process the block 102 after DC partition finished fetching it`,
-      ).toEqual((
-        ["101-0", "102-0", "102-1", "102-2"],
-        [
-          {
-            "fromBlock": 105,
-            "toBlock": None,
-            "retry": 0,
-            "p": "0",
-          },
-          {
-            "fromBlock": 103,
-            "toBlock": None,
-            "retry": 0,
-            "p": "1",
-          },
-        ],
-      ))
+      ).toEqual(["101-0", "102-0", "102-1", "102-2"])
+      t.expect(
+        sourceMock.getItemsOrThrowCalls->Array.some(c =>
+          c.payload["p"] !== "0" && c.payload["fromBlock"] === 103
+        ),
+        ~message="Continues fetching the dynamic-contract partition from block 103",
+      ).toBe(true)
       t.expect(
         await queryDynamicAddresses(indexer),
         ~message="Added the processed dynamic contract to the db",
@@ -1092,25 +1071,14 @@ describe("E2E rollback tests", () => {
 
       await indexer.getRollbackReadyPromise()
 
+      // Both surviving address sets are recreated at block 102; the fork
+      // coalesces partitions that share a frontier, so their count is not
+      // pinned, only that every re-request starts right after the target.
+      let reRequested = sourceMock.getItemsOrThrowCalls->Array.map(c => c.payload["fromBlock"])
       t.expect(
-        sourceMock.getItemsOrThrowCalls->Array.map(c => c.payload),
-        ~message="Should rollback fetch state and re-request items",
-      ).toEqual([
-        // Normal partition (recreated fresh, no chunking)
-        {
-          "fromBlock": 103,
-          "toBlock": None,
-          "retry": 0,
-          "p": "0",
-        },
-        // DC partition (recreated fresh, no chunking since chunk history lost)
-        {
-          "fromBlock": 103,
-          "toBlock": None,
-          "retry": 0,
-          "p": "1",
-        },
-      ])
+        (reRequested->Array.length > 0, reRequested->Array.every(fromBlock => fromBlock === 103)),
+        ~message="Should rollback fetch state and re-request items from block 103",
+      ).toEqual((true, true))
 
       // Asserted here rather than after the re-fetch below: the rollback is
       // resolved but nothing has been written yet, and how many ticks a write
@@ -1148,12 +1116,14 @@ describe("E2E rollback tests", () => {
           contractName: "SimpleNft",
         },
       ])
-      // After the db rollback, both partitions continue from block 105 (no chunk history yet)
-      let payloads = sourceMock.getItemsOrThrowCalls->Array.map(c => c.payload)
+      // After the db rollback, fetching continues from block 105 (no chunk
+      // history yet). Under the fork the continuation may be chunked, so the
+      // pending set is pinned by its lowest block, not its exact shape.
+      let fromBlocks = sourceMock.getItemsOrThrowCalls->Array.map(c => c.payload["fromBlock"])
       t.expect(
-        payloads->Array.map(p => (p["p"], p["fromBlock"], p["toBlock"])),
+        (fromBlocks->Array.some(b => b === 105), fromBlocks->Array.every(b => b >= 105)),
         ~message="Should correctly continue fetching from block 105 after rolling back the db",
-      ).toEqual([("1", 105, None), ("0", 105, None)])
+      ).toEqual((true, true))
     },
   )
 
@@ -2063,10 +2033,12 @@ describe("E2E rollback tests", () => {
       ).toEqual(1)
 
       // First reorg: rolls back past block 102, so the address store drops the
-      // registration and hands its row over for deletion.
+      // registration and hands its row over for deletion. Reported by whichever
+      // query continues from block 103: the fork coalesces the registration's
+      // partition back into the config partition once it has caught up.
       sourceMock.resolveGetItemsOrThrow(
         [],
-        ~filter=query => query["p"] === "1",
+        ~filter=MockSource.coveringBlock(103),
         ~prevRangeLastBlock={blockNumber: 102, blockHash: "0x102a"},
       )
       await Utils.delay(0)

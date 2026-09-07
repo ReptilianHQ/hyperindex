@@ -75,7 +75,11 @@ describe("TestIndexer chain info and process() guards", () => {
   it("processes a chain with no events into an empty change set", async (t) => {
     const indexer = createTestIndexer();
 
-    t.expect(await indexer.process({ chains: { 1: { startBlock: 1, endBlock: 100 } } })).toEqual({
+    // An empty simulation keeps the run offline: no HyperSync token is needed
+    // to prove that a range with nothing in it yields no changes.
+    t.expect(
+      await indexer.process({ chains: { 1: { startBlock: 1, endBlock: 100, simulate: [] } } })
+    ).toEqual({
       changes: [],
     });
   });
@@ -90,9 +94,13 @@ describe("TestIndexer chain info and process() guards", () => {
 
   it("rejects a second process() while the first is still running", async (t) => {
     const indexer = createTestIndexer();
-    const first = indexer.process({ chains: { 1: { startBlock: 1, endBlock: 100 } } });
+    const first = indexer.process({
+      chains: { 1: { startBlock: 1, endBlock: 100, simulate: [] } },
+    });
 
-    t.expect(() => indexer.process({ chains: { 1: { startBlock: 1, endBlock: 100 } } })).toThrowError(
+    t.expect(() =>
+      indexer.process({ chains: { 1: { startBlock: 1, endBlock: 100, simulate: [] } } })
+    ).toThrowError(
       "createTestIndexer process is already running. Only one process call is allowed at a time"
     );
 

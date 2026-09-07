@@ -360,7 +360,7 @@ Pick one:
   })
 
   Async.it(
-    "Priority: version bump with otherwise disjoint shape → only version bullet shown",
+    "Version changes are informational; the highest structural tier is shown",
     async t => {
       let stored = JSON.parseOrThrow(`{
         "version": "1.0",
@@ -379,11 +379,11 @@ Pick one:
       let (_, message, _) = await resumeWith(~storedEnvioInfo=Some(stored), ~current)
       t.expect(
         message,
-        ~message="lower tiers (name/storage/ecosystem/entities) suppressed by version diff",
+        ~message="version is ignored and lower tiers are suppressed by the name diff",
       ).toBe(
         `The following config changes are incompatible with the existing indexer data:
 
-    - version
+    - name
 
 Pick one:
   1. Revert the changes above  # resume indexing where it left off
