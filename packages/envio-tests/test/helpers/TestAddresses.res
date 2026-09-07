@@ -203,11 +203,14 @@ let partitions = (optimizedPartitions: FetchState.OptimizedPartitions.t) => {
   entities: optimizedPartitions.entities->Utils.Dict.mapValues(partition),
 }
 
+// Query provenance is validated separately (SourceManager_test, RateLimit_test,
+// the threshold properties); structural fixtures carry this value on both
+// sides so `query` can normalize it out.
+let anyRangeReason: FetchState.rangeReason = FetchState.Adaptive
+
 let query = (q: FetchState.query): FetchState.query => {
   ...q,
-  // Query provenance is validated separately; normalize it out of the older
-  // structural expectations this helper serves.
-  rangeReason: "test",
+  rangeReason: anyRangeReason,
   addresses: q.addresses->comparable,
 }
 

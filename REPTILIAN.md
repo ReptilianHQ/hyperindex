@@ -17,21 +17,21 @@ the application-specific runtime behavior that upstream does not provide:
   (`FetchState.OptimizedPartitions.coalesceAddressBoundPartitions`);
 - configurable per-partition and per-chain request concurrency
   (`ENVIO_MAX_PARTITION_CONCURRENCY`, `ENVIO_MAX_CHAIN_CONCURRENCY`);
-- a scheduling policy change in `FetchState.getNextQuery`: gap fills that
-  unblock a retained response are admitted ahead of all other work and are not
-  gated on the soft target, and fresh work is selected in partition-fair rounds
-  before the block-ordered budget pass;
+- a scheduling policy change in `FetchState.getNextQuery`: gap fills
+  (`FetchState.rangeReason` `GapFill`) that unblock a retained response are
+  admitted ahead of all other work and are not gated on the soft target, and
+  fresh work is selected in partition-fair rounds before the block-ordered
+  budget pass;
 - optional fixed-block historical source request pacing with finite-boundary
   handling (`ENVIO_SOURCE_BLOCKS_PER_REQUEST`, historical only);
 - optional `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` coalescing after realtime is
   reached, without delaying historical backfill or RPC realtime fetching;
 - low-cardinality source, pipeline, PostgreSQL, and phase telemetry hooks
-  (`RuntimeHooks`, bound through `globalThis` symbols by the host). The
-  `record*` counters are resolved once when the runtime module loads, so the
-  host must install its symbols before the envio module graph is evaluated,
-  which in ESM means from a `--import` preload (as chain-indexer does), not
-  from a statement above the import; a symbol installed later is a silent
-  no-op for those counters (the `trace*` wrappers resolve per call);
+  (`RuntimeHooks`, bound through `globalThis` symbols by the host). Every hook
+  is resolved per call, so the host may install its symbols before or after
+  importing envio; an uninstalled hook is a no-op. Query range reasons reach
+  the source-range hook as the strings `full_range`, `merge_boundary`,
+  `end_boundary`, `adaptive`, `gap_fill` and `provider_retry`;
 - a client-filter address threshold derived from upstream's fixed concurrency,
   so `ENVIO_MAX_CHAIN_CONCURRENCY` never moves the filtering switch;
 - bounded source-query retries (`ENVIO_SOURCE_QUERY_MAX_RETRIES`,

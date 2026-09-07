@@ -966,7 +966,8 @@ let executeQuery = async (
       switch (source.poweredByHyperSync, toBlock) {
       | (true, Some(requestedToBlock)) =>
         let reason = switch query.toBlock {
-        | Some(plannedToBlock) if plannedToBlock === requestedToBlock => query.rangeReason
+        | Some(plannedToBlock) if plannedToBlock === requestedToBlock =>
+          (query.rangeReason :> string)
         | _ => "provider_retry"
         }
         safelyRecord(() =>
