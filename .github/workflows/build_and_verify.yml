@@ -15,7 +15,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  ENVIO_API_TOKEN: ${{ secrets.ENVIO_API_TOKEN }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -90,7 +89,8 @@ jobs:
       - name: Build linux-x64 platform npm package
         run: |
           node packages/build-envio/build-platform-package.ts \
-            --version "0.0.1-dev" --platform "linux" --arch "x64" --out "envio-linux-x64"
+            --version "0.0.1-dev" --platform "linux" --arch "x64" \
+            --scope reptilianhq --out "envio-linux-x64"
           mkdir -p envio-linux-x64
           cp target/release/libenvio.so envio-linux-x64/envio.node
 
@@ -158,6 +158,31 @@ jobs:
       - name: Hypersync Health Test
         run: cargo test --features hypersync_health --test hypersync_health
 
+  # Authenticated live-service coverage is intentionally separate from the
+  # deterministic artifact, template, scenario, and smoke-test gates.
+  hypersync-live-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    needs: build-envio-package
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: ./.github/actions/prepare-envio-artifacts
+
+      - name: Run authenticated HyperSync integration tests when configured
+        working-directory: packages/envio-tests
+        env:
+          ENVIO_API_TOKEN: ${{ secrets.ENVIO_API_TOKEN }}
+        run: |
+          if [ -z "$ENVIO_API_TOKEN" ]; then
+            echo "HyperSync live tests skipped: ENVIO_API_TOKEN is not configured." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          pnpm test:hypersync-live
+
   # Template tests - verify envio templates can be initialized and built
   template-tests:
     runs-on: ubuntu-latest
@@ -223,7 +248,7 @@ jobs:
 
       - name: envio-tests (${{ matrix.storage }})
         working-directory: packages/envio-tests
-        run: pnpm test
+        run: pnpm test:offline
         env:
           ENVIO_TEST_STORAGE: ${{ matrix.storage }}
 
