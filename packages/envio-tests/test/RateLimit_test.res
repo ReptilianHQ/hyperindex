@@ -250,7 +250,7 @@ let makeRangeQuery = (): FetchState.query => {
   fromBlock: 1,
   toBlock: Some(10),
   isChunk: true,
-  rangeReason: "full_range",
+  rangeReason: FetchState.FullRange,
   itemsTarget: None,
   itemsEst: 1,
   selection: FetchState.makeSelection(~dependsOnAddresses=true, ~onEventRegistrations=[]),

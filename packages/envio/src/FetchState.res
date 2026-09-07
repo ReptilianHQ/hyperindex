@@ -108,12 +108,22 @@ type partition = {
   latestSourceRangeCapacityUpdateBlock: int,
 }
 
+// Why a query spans the range it does. The scheduler admits GapFill ahead of
+// every other reason; the rest are telemetry. @as keeps the runtime strings
+// the host's source-range hook already accepts.
+type rangeReason =
+  | @as("full_range") FullRange
+  | @as("merge_boundary") MergeBoundary
+  | @as("end_boundary") EndBoundary
+  | @as("adaptive") Adaptive
+  | @as("gap_fill") GapFill
+
 type query = {
   partitionId: string,
   fromBlock: int,
   toBlock: option<int>,
   isChunk: bool,
-  rangeReason: string,
+  rangeReason: rangeReason,
   // Server-side maxNumLogs-style cap. Some only for open-ended probes, whose
   // range isn't otherwise bounded; None for bounded chunk/gap-fill queries,
   // whose toBlock already bounds the response so a cap would only self-truncate
@@ -2159,7 +2169,7 @@ let pushGapFillQueries = (
           ~fromBlock=rangeFromBlock,
           ~toBlock=rangeEndBlock,
           ~isChunk,
-          ~rangeReason="gap_fill",
+          ~rangeReason=GapFill,
           ~density,
           ~chainTargetBlock,
           ~selection,
@@ -2182,7 +2192,7 @@ let pushGapFillQueries = (
               ~fromBlock=chunkFromBlock.contents,
               ~toBlock=Some(chunkToBlock),
               ~isChunk=true,
-              ~rangeReason="gap_fill",
+              ~rangeReason=GapFill,
               ~density,
               ~chainTargetBlock,
               ~selection,
@@ -2386,12 +2396,12 @@ let pushForwardCandidates = (
       ) {
         let chunkToBlock = Pervasives.min(chunkFromBlock.contents + chunkSize - 1, maxBlock)
         let rangeReason = if chunkToBlock - chunkFromBlock.contents + 1 === chunkSize {
-          "full_range"
+          FullRange
         } else {
           switch (p.mergeBlock, fs.queryEndBlock) {
-          | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => "merge_boundary"
-          | (_, Some(_)) => "end_boundary"
-          | _ => "full_range"
+          | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => MergeBoundary
+          | (_, Some(_)) => EndBoundary
+          | _ => FullRange
           }
         }
         let itemsEst =
@@ -2435,9 +2445,9 @@ let pushForwardCandidates = (
         toBlock: fs.queryEndBlock,
         isChunk: false,
         rangeReason: switch (p.mergeBlock, fs.queryEndBlock) {
-        | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => "merge_boundary"
-        | (_, Some(_)) => "end_boundary"
-        | _ => "adaptive"
+        | (Some(mergeBlock), Some(endBlock)) if mergeBlock === endBlock => MergeBoundary
+        | (_, Some(_)) => EndBoundary
+        | _ => Adaptive
         },
         selection: p.selection,
         // An open-ended probe's range isn't bounded to source capacity, so it
@@ -2488,7 +2498,7 @@ let selectFairCandidates = (
   // prerequisite-borrow slot when reservations exhaust the budget. If fairness
   // sliced them away first, a fully reserved budget could deadlock even though
   // the chain still had a free concurrency slot.
-  let gapCandidates = candidates->Array.filter(query => query.rangeReason === "gap_fill")
+  let gapCandidates = candidates->Array.filter(query => query.rangeReason === GapFill)
   gapCandidates->Array.sort((a, b) => Int.compare(a.fromBlock, b.fromBlock))
   let selectedGapCandidates = gapCandidates->Array.slice(
     ~start=0,
@@ -2498,7 +2508,7 @@ let selectFairCandidates = (
 
   let nextRoundByPartition = Dict.make()
   let ranked = candidates
-  ->Array.filter(query => query.rangeReason !== "gap_fill")
+  ->Array.filter(query => query.rangeReason !== GapFill)
   ->Array.map(query => {
     let round = nextRoundByPartition->Dict.get(query.partitionId)->Option.getOr(0)
     nextRoundByPartition->Dict.set(query.partitionId, round + 1)
@@ -2549,8 +2559,8 @@ let acceptCandidates = (
   })
 
   candidates->Array.sort((a, b) => {
-    let aPriority = a.rangeReason === "gap_fill" ? 0 : 1
-    let bPriority = b.rangeReason === "gap_fill" ? 0 : 1
+    let aPriority = a.rangeReason === GapFill ? 0 : 1
+    let bPriority = b.rangeReason === GapFill ? 0 : 1
     aPriority !== bPriority
       ? Int.compare(aPriority, bPriority)
       : Int.compare(a.fromBlock, b.fromBlock)
@@ -2562,7 +2572,7 @@ let acceptCandidates = (
   let usedConcurrency = ref(reservations->Array.length)
   let canBorrowFreshBudget = query =>
     !borrowedFreshBudget.contents &&
-    (query.rangeReason === "gap_fill" ||
+    (query.rangeReason === GapFill ||
     switch earliestReservationBlock.contents {
     | Some(fromBlock) => query.fromBlock < fromBlock
     | None => false
