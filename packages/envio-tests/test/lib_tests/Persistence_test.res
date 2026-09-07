@@ -360,7 +360,7 @@ Pick one:
   })
 
   Async.it(
-    "Version changes are informational; the highest structural tier is shown",
+    "Priority: version bump with otherwise disjoint shape → only version bullet shown",
     async t => {
       let stored = JSON.parseOrThrow(`{
         "version": "1.0",
@@ -379,7 +379,44 @@ Pick one:
       let (_, message, _) = await resumeWith(~storedEnvioInfo=Some(stored), ~current)
       t.expect(
         message,
-        ~message="version is ignored and lower tiers are suppressed by the name diff",
+        ~message="lower tiers (name/storage/ecosystem/entities) suppressed by version diff",
+      ).toBe(
+        `The following config changes are incompatible with the existing indexer data:
+
+    - version
+
+Pick one:
+  1. Revert the changes above  # resume indexing where it left off
+  2. envio dev -r              # delete all indexed data and start over
+  3. Run a second indexer alongside this one — keep both datasets:
+       ENVIO_PG_SCHEMA=<new_schema> \\
+       ENVIO_INDEXER_PORT=<new_port> \\
+       envio dev`,
+      )
+    },
+  )
+
+  Async.it(
+    "Fork release suffix changes are informational; the highest structural tier is shown",
+    async t => {
+      // The fork publishes 3.9.0-reptilian.N; only the base version is compared,
+      // so a fork release resumes and the name diff is what gets reported.
+      let stored = JSON.parseOrThrow(`{
+        "version": "3.9.0-reptilian.1",
+        "name": "old",
+        "storage": {"a": 1},
+        "entities": [{"name": "A"}]
+      }`)
+      let current = JSON.parseOrThrow(`{
+        "version": "3.9.0-reptilian.2",
+        "name": "new",
+        "storage": {"b": 2},
+        "entities": [{"name": "B"}]
+      }`)
+      let (_, message, _) = await resumeWith(~storedEnvioInfo=Some(stored), ~current)
+      t.expect(
+        message,
+        ~message="the fork suffix is ignored and lower tiers are suppressed by the name diff",
       ).toBe(
         `The following config changes are incompatible with the existing indexer data:
 
