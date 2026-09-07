@@ -10,27 +10,29 @@ let getLastKnownValidBlock = async (
   ~reorgBlockNumber: int,
   ~isRealtime: bool,
 ) => {
-  // Don't include the reorg block itself — different source instances
+  // Before the search, not after: it re-fetches the scanned hashes through the
+  // sources, and a source answering from a cache it filled on the orphaned
+  // chain would confirm blocks that no longer exist - stopping the rollback
+  // short of the real fork.
+  chainState->ChainState.sourceManager->SourceManager.onReorg
+
+  // Don't include the reorg block itself - different source instances
   // may have mismatching hashes at the head, so we always rollback
   // the block where we detected the reorg.
   let scannedBlockNumbers =
-    chainState
-    ->ChainState.reorgDetection
-    ->ReorgDetection.getThresholdBlockNumbersBelowBlock(
-      ~blockNumber=reorgBlockNumber,
-      ~knownHeight=chainState->ChainState.knownHeight,
-    )
+    chainState->ChainState.getReorgThresholdBlockNumbersBelow(~blockNumber=reorgBlockNumber)
 
   switch scannedBlockNumbers {
   | [] => chainState->ChainState.getHighestBlockBelowThreshold
   | _ => {
-      let blockNumbersAndHashes = await chainState
+      let blockStore = await chainState
       ->ChainState.sourceManager
       ->SourceManager.getBlockHashes(~blockNumbers=scannedBlockNumbers, ~isRealtime)
 
-      switch chainState
-      ->ChainState.reorgDetection
-      ->ReorgDetection.getLatestValidScannedBlock(~blockNumbersAndHashes) {
+      switch chainState->ChainState.getLatestValidScannedBlock(
+        ~blockStore,
+        ~blockNumbers=scannedBlockNumbers,
+      ) {
       | Some(blockNumber) => blockNumber
       | None => chainState->ChainState.getHighestBlockBelowThreshold
       }
@@ -54,14 +56,11 @@ let rec rollback = async (
       let chainState = state->IndexerState.getChainState(~chainId)
 
       state->IndexerState.enterFindingReorgDepth
+
       let rollbackTargetBlockNumber = await chainState->getLastKnownValidBlock(
         ~reorgBlockNumber,
         ~isRealtime=state->IndexerState.isRealtime,
       )
-
-      chainState
-      ->ChainState.sourceManager
-      ->SourceManager.onReorg(~rollbackTargetBlock=rollbackTargetBlockNumber)
 
       state->IndexerState.foundReorgDepth(~chainId, ~rollbackTargetBlockNumber)
       // Rendezvous with the processing loop: whichever of {depth found, loop
@@ -159,21 +158,24 @@ and executeRollback = async (
   }
 
   let rolledBackChains = []
+  let rolledBackAddresses = []
   state
   ->IndexerState.chainStates
   ->Utils.Dict.forEach(cs => {
     let chainId = (cs->ChainState.chainConfig).id
     let fromBlock = cs->ChainState.committedProgressBlockNumber
-    cs->ChainState.rollback(
-      ~newProgressBlockNumber=newProgressBlockNumberPerChain->ChainId.Dict.dangerouslyGetNonOption(
-        chainId,
-      ),
-      ~eventsProcessedDiff=eventsProcessedDiffByChain->ChainId.Dict.dangerouslyGetNonOption(
-        chainId,
-      ),
-      ~rollbackTargetBlockNumber,
-      ~isReorgChain=chainId === reorgChain,
-    )
+    let killedAddresses =
+      cs->ChainState.rollback(
+        ~newProgressBlockNumber=newProgressBlockNumberPerChain->ChainId.Dict.dangerouslyGetNonOption(
+          chainId,
+        ),
+        ~eventsProcessedDiff=eventsProcessedDiffByChain->ChainId.Dict.dangerouslyGetNonOption(
+          chainId,
+        ),
+        ~rollbackTargetBlockNumber,
+        ~isReorgChain=chainId === reorgChain,
+      )
+    rolledBackAddresses->Array.pushMany(killedAddresses)->ignore
     let toBlock = cs->ChainState.committedProgressBlockNumber
     if fromBlock !== toBlock {
       rolledBackChains
@@ -193,6 +195,7 @@ and executeRollback = async (
     ~rollbackTargetCheckpointId,
     ~rollbackDiffCheckpointId=state->IndexerState.committedCheckpointId->BigInt.add(1n),
     ~progressBlockNumberByChainId=newProgressBlockNumberPerChain,
+    ~rolledBackAddresses,
   )
 
   rolledBackChains->Array.forEach(rolledBack => {

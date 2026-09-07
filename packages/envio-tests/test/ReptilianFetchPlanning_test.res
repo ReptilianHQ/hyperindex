@@ -25,7 +25,7 @@ let buildRegistration = (~contractName, ~index) => {
 
 let makePartition = (~id, ~contractName, ~registration, ~addresses): FetchState.partition => {
   id,
-  latestFetchedBlock: {blockNumber: 100, blockTimestamp: 0},
+  latestFetchedBlock: 100,
   selection: FetchState.makeSelection(
     ~onEventRegistrations=[registration],
     ~dependsOnAddresses=true,

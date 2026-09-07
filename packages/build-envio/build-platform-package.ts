@@ -3,7 +3,7 @@
  * Generates a publish-ready package.json for a platform-specific binary package.
  *
  * Usage:
- *   node build-platform-package.ts --version <version> --platform <os> --arch <arch> --scope <scope> --out <dir>
+ *   node build-platform-package.ts --version <version> --platform <os> --arch <arch> [--scope <scope>] --out <dir>
  */
 
 import { writeFileSync, copyFileSync, mkdirSync } from "node:fs";
@@ -27,7 +27,7 @@ const { values } = parseArgs({
 
 if (!values.version || !values.platform || !values.arch || !values.out) {
   console.error(
-    "Usage: node build-platform-package.ts --version <v> --platform <os> --arch <arch> --scope <scope> [--libc <glibc|musl>] --out <dir>"
+    "Usage: node build-platform-package.ts --version <v> --platform <os> --arch <arch> [--scope <scope>] [--libc <glibc|musl>] --out <dir>"
   );
   process.exit(1);
 }

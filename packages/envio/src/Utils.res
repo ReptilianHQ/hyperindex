@@ -199,6 +199,13 @@ module Dict = {
     }
   `)
 
+  let clearInPlace: dict<'a> => unit = %raw(`(dict) => {
+      for (const key in dict) {
+        delete dict[key];
+      }
+    }
+  `)
+
   let unsafeDeleteUndefinedFieldsInPlace: 'a => unit = %raw(`(dict) => {
       for (var key in dict) {
         if (dict[key] === undefined) {
@@ -575,6 +582,9 @@ module Set = {
 
   @send
   external intersection: (t<'value>, t<'value>) => t<'value> = "intersection"
+
+  @send
+  external union: (t<'value>, t<'value>) => t<'value> = "union"
 
   let immutableAdd: (t<'a>, 'a) => t<'a> = %raw(`(set, value) => {
     return new Set([...set, value])

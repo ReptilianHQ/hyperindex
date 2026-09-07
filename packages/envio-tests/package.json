@@ -6,11 +6,14 @@
   "scripts": {
     "build": "rescript",
     "watch": "rescript watch",
-    "test": "rescript && vitest run --exclude test/HyperSyncClient_test.res.mjs --exclude test/HyperSync_test.res.mjs --exclude test/SvmHyperSyncClient_test.res.mjs",
+    "lint": "node scripts/lint-inputs.ts",
+    "test": "node scripts/lint-inputs.ts && rescript && vitest run --exclude test/HyperSyncClient_test.res.mjs --exclude test/HyperSync_test.res.mjs",
+    "test:update-log-snapshots": "ENVIO_TEST_LOGGING_FORMAT=1 node scripts/update-log-snapshots.mjs",
     "test:offline": "pnpm test",
-    "test:hypersync-live": "rescript && vitest run test/HyperSyncClient_test.res.mjs test/HyperSync_test.res.mjs"
+    "test:hypersync-live": "rescript && vitest run test/HyperSyncClient_test.res.mjs test/HyperSync_test.res.mjs test/RpcSource_test.res.mjs test/SourceBlockHashes_test.res.mjs"
   },
   "devDependencies": {
+    "@hegeldev/hegel": "^0.4.5",
     "@rescript/runtime": "12.2.0",
     "@types/node": "24.12.2",
     "rescript": "12.2.0",
@@ -24,6 +27,6 @@
     "envio": "file:../envio"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.18.0"
   }
 }

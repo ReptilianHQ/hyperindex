@@ -18,7 +18,7 @@ use hypersync_client_solana::decode::{
     InstructionSchema as UpstreamIxSchema, NamedAccount as UpstreamAccount,
     NamedField as UpstreamNamedField, ProgramSchema as UpstreamSchema,
 };
-use hypersync_client_solana::simple_types::Instruction as UpstreamInstruction;
+use hypersync_client_solana::simple_types::InstructionCall as UpstreamInstructionCall;
 
 use crate::config_parsing::human_config::svm::{ArgComposite, ArgDef, ArgPrimitive, ArgType};
 
@@ -41,23 +41,16 @@ pub(crate) struct InstructionSchemaInput {
 /// query response instead of crossing the napi boundary one instruction at a
 /// time.
 ///
-/// POC policy: any decode failure (unknown discriminator, account-count
-/// mismatch, trailing bytes, unresolved type) yields `None` so the indexer
-/// keeps running. Real on-chain calls drift from schemas in small ways
-/// (Metaplex `rent` slot was optional in some versions, etc.); a single bad
-/// row should not kill the worker.
+/// Any decode failure (unknown discriminator, account-count mismatch, trailing
+/// bytes, unresolved type) yields `None` rather than an error: real on-chain
+/// calls drift from schemas in small ways (Metaplex `rent` slot was optional in
+/// some versions, etc.), and a single bad row should not kill the worker. The
+/// caller drops such an instruction instead of running handlers on empty args.
 pub(crate) fn decode_with_schema(
     schema: &UpstreamSchema,
-    accounts: Vec<String>,
-    data: Vec<u8>,
+    instruction: &UpstreamInstructionCall,
 ) -> Option<DecodedInstructionJson> {
-    let ix = UpstreamInstruction {
-        program_id: schema.program_id.clone(),
-        accounts,
-        data,
-        ..Default::default()
-    };
-    upstream_decode(schema, &ix).ok().map(Into::into)
+    upstream_decode(schema, instruction).ok().map(Into::into)
 }
 
 /// JS-facing shape of `DecodedInstruction`. Args + named accounts are passed

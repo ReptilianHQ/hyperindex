@@ -3,7 +3,7 @@ name: Publish Reptilian Envio runtime
 on:
   push:
     tags:
-      - "v3.6.1-reptilian.*"
+      - "v3.9.0-reptilian.*"
   workflow_dispatch:
     inputs:
       version:
@@ -37,7 +37,7 @@ jobs:
           else
             version="${GITHUB_REF_NAME#v}"
           fi
-          if [[ ! "$version" =~ ^3\.6\.1-reptilian\.[0-9]+$ ]]; then
+          if [[ ! "$version" =~ ^3\.9\.0-reptilian\.[0-9]+$ ]]; then
             echo "Unsupported fork version: $version"
             exit 1
           fi
@@ -58,22 +58,30 @@ jobs:
             fi
           fi
           run_id=""
-          for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/build_and_verify.yml/runs?head_sha=${release_sha}&status=completed&per_page=10" --jq '.workflow_runs[].id'); do
+          # Only runs of the `push` to main count. Build & Verify also runs on
+          # pull_request_target, and GitHub records those runs under the base
+          # branch's head_sha while their artifacts are built from the PR head,
+          # so without this filter a PR run could hand its npm-pkg-envio artifact
+          # to the release.
+          for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/build_and_verify.yml/runs?head_sha=${release_sha}&event=push&status=completed&per_page=10" --jq '.workflow_runs[] | select(.head_branch == "main") | .id'); do
             # TEMPORARY: hypersync-health-check is excluded from this release gate.
-            # It probes every supported public EVM HyperSync endpoint, so an
-            # unrelated endpoint outage (currently chain 255) can fail independently
-            # of the release artifacts. Revert once endpoint health is non-blocking.
+            # It probes every supported public EVM HyperSync endpoint and panics on
+            # the first failure, so an unrelated endpoint outage (currently chain
+            # 255, Kroma) can fail independently of the release artifacts. The
+            # fork's own chain 988 sits after 255 in the loop, so its endpoint
+            # health has not been observed by this job yet. Revert once endpoint
+            # health is non-blocking.
             required=$(gh api "repos/${{ github.repository }}/actions/runs/${candidate}/jobs?per_page=100" \
-              --jq '[.jobs[] | select(.name == "build-envio-package" or .name == "cargo-test" or .name == "template-tests" or .name == "scenarios-test" or .name == "e2e-test")]')
+              --jq '[.jobs[] | select(.name == "build-envio-package" or .name == "cargo-test" or .name == "template-tests" or (.name | startswith("envio-tests")) or .name == "scenarios-test" or .name == "e2e-test")]')
             count=$(echo "$required" | jq 'length')
             failures=$(echo "$required" | jq '[.[] | select(.conclusion != "success")] | length')
-            if [ "$count" = "5" ] && [ "$failures" = "0" ]; then
+            if [ "$count" = "7" ] && [ "$failures" = "0" ]; then
               run_id="$candidate"
               break
             fi
           done
           if [ -z "$run_id" ]; then
-            echo "No fully successful deterministic Build & Verify run found for ${{ github.sha }}"
+            echo "No fully successful deterministic Build & Verify push run found for ${release_sha}"
             exit 1
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"

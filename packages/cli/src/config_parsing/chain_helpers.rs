@@ -155,7 +155,7 @@ pub enum Network {
     )]
     EthereumMainnet = 1,
 
-    #[subenum(HypersyncChain)]
+    #[subenum(HypersyncChain, NetworkWithExplorer)]
     Etherlink = 42793,
 
     #[subenum(NetworkWithExplorer)]
@@ -672,6 +672,16 @@ mod test {
         let names_des: Vec<HypersyncChain> = serde_json::from_str(names).unwrap();
         let expected = vec![HypersyncChain::EthereumMainnet, HypersyncChain::Polygon];
         assert_eq!(expected, names_des);
+    }
+
+    // Fork divergence: chain 988 is not in upstream's enum. If upstream ever
+    // claims the id this stops compiling or fails here, which is the point.
+    #[test]
+    fn stables_kinship_grass_is_a_hypersync_chain() {
+        let network = Network::from_network_id(988).unwrap();
+        assert_eq!(network, Network::StablesKinshipGrass);
+        assert!(HypersyncChain::try_from(network).is_ok());
+        assert_eq!("stables-kinship-grass", network.to_string());
     }
 
     #[test]

@@ -19,5 +19,8 @@ scenarios/**/node_modules/*
 
 rescript.lock
 
+# Transient git worktrees created for background agents.
+.claude/worktrees/
+
 # Hegel property-test example database
 .hegel/

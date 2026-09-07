@@ -84,16 +84,22 @@ describe("Config.stripSensitiveData", () => {
 })
 
 describe("Config.diffPaths", () => {
-  it("allows a version-only upgrade when the data contract is unchanged", t => {
-    let stored = json(`{"version": "3.5.0-alpha.1", "name": "demo", "entities": []}`)
-    let current = json(`{"version": "3.5.0", "name": "demo", "entities": []}`)
-    t.expect(Config.diffPaths(~stored, ~current), ~message="version-only upgrade").toEqual([])
+  it("allows a fork-release upgrade when the base version is unchanged", t => {
+    let stored = json(`{"version": "3.9.0-reptilian.1", "name": "demo", "entities": []}`)
+    let current = json(`{"version": "3.9.0-reptilian.2", "name": "demo", "entities": []}`)
+    t.expect(Config.diffPaths(~stored, ~current), ~message="fork-suffix-only upgrade").toEqual([])
   })
 
-  it("still reports structural changes across a version upgrade", t => {
-    let stored = json(`{"version": "3.5.0-alpha.1", "name": "old", "entities": []}`)
-    let current = json(`{"version": "3.5.0", "name": "new", "entities": []}`)
+  it("still reports structural changes across a fork-release upgrade", t => {
+    let stored = json(`{"version": "3.9.0-reptilian.1", "name": "old", "entities": []}`)
+    let current = json(`{"version": "3.9.0-reptilian.2", "name": "new", "entities": []}`)
     t.expect(Config.diffPaths(~stored, ~current), ~message="structural change").toEqual(["name"])
+  })
+
+  it("reports a base version upgrade ahead of everything else", t => {
+    let stored = json(`{"version": "3.6.1-reptilian.10", "name": "old", "entities": []}`)
+    let current = json(`{"version": "3.9.0-reptilian.1", "name": "new", "entities": []}`)
+    t.expect(Config.diffPaths(~stored, ~current), ~message="base upgrade").toEqual(["version"])
   })
 
   it("returns [] for structurally equal JSON regardless of key order", t => {
