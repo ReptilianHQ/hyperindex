@@ -65,9 +65,12 @@ jobs:
           # to the release.
           for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/build_and_verify.yml/runs?head_sha=${release_sha}&event=push&status=completed&per_page=10" --jq '.workflow_runs[] | select(.head_branch == "main") | .id'); do
             # TEMPORARY: hypersync-health-check is excluded from this release gate.
-            # It probes every supported public EVM HyperSync endpoint, so an
-            # unrelated endpoint outage (currently chain 255) can fail independently
-            # of the release artifacts. Revert once endpoint health is non-blocking.
+            # It probes every supported public EVM HyperSync endpoint and panics on
+            # the first failure, so an unrelated endpoint outage (currently chain
+            # 255, Kroma) can fail independently of the release artifacts. The
+            # fork's own chain 988 sits after 255 in the loop, so its endpoint
+            # health has not been observed by this job yet. Revert once endpoint
+            # health is non-blocking.
             required=$(gh api "repos/${{ github.repository }}/actions/runs/${candidate}/jobs?per_page=100" \
               --jq '[.jobs[] | select(.name == "build-envio-package" or .name == "cargo-test" or .name == "template-tests" or (.name | startswith("envio-tests")) or .name == "scenarios-test" or .name == "e2e-test")]')
             count=$(echo "$required" | jq 'length')

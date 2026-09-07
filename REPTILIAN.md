@@ -26,7 +26,11 @@ the application-specific runtime behavior that upstream does not provide:
 - optional `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` coalescing after realtime is
   reached, without delaying historical backfill or RPC realtime fetching;
 - low-cardinality source, pipeline, PostgreSQL, and phase telemetry hooks
-  (`RuntimeHooks`, bound through `globalThis` symbols by the host);
+  (`RuntimeHooks`, bound through `globalThis` symbols by the host). The
+  `record*` counters are resolved once when the runtime module loads, so the
+  host must install its symbols before its first `import "envio"`, as
+  chain-indexer does through a `--import` preload; a symbol installed later is
+  a silent no-op for those counters (the `trace*` wrappers resolve per call);
 - a client-filter address threshold derived from upstream's fixed concurrency,
   so `ENVIO_MAX_CHAIN_CONCURRENCY` never moves the filtering switch;
 - bounded source-query retries (`ENVIO_SOURCE_QUERY_MAX_RETRIES`,

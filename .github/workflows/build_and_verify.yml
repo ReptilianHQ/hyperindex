@@ -160,11 +160,12 @@ jobs:
 
   # Authenticated live-service coverage is intentionally separate from the
   # deterministic artifact, template, scenario, and smoke-test gates.
+  # Not in the publish gate, but a live regression shows as a red check when
+  # the token is configured; the step skips itself when it is not.
   hypersync-live-test:
     runs-on: ubuntu-latest
     timeout-minutes: 9
     needs: build-envio-package
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v6

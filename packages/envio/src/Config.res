@@ -1305,7 +1305,8 @@ let diffPaths = (~stored: JSON.t, ~current: JSON.t): array<string> => {
     let versionDiffers = switch (getTopKey(stored, "version"), getTopKey(current, "version")) {
     | (Some(String(s)), Some(String(c))) => baseVersion(s) !== baseVersion(c)
     | (None, None) => false
-    | (s, c) => !canonEq(s->Option.getOr(Null), c->Option.getOr(Null))
+    | (None, Some(_)) | (Some(_), None) => true
+    | (Some(s), Some(c)) => !canonEq(s, c)
     }
     let tiers = [
       ["chainIdMode"],

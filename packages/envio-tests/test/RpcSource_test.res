@@ -6,12 +6,9 @@ let hasLiveApiToken = testApiToken !== "" && testApiToken !== "offline-tests"
 
 // A case that talks to a live endpoint: skipped in offline runs, and retried
 // as upstream configured it when a real token makes it run.
-let itLive = (name, ~retry=?, body) =>
+let itLive = (name, ~retry, body) =>
   if hasLiveApiToken {
-    switch retry {
-    | Some(retry) => Async.itWithOptions(name, {retry: retry}, body)
-    | None => Async.it(name, body)
-    }
+    Async.itWithOptions(name, {retry: retry}, body)
   } else {
     Async.it_skip(name, body)
   }
