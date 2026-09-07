@@ -5,38 +5,38 @@ type symbol
 @val @scope("Symbol") external symbolFor: string => symbol = "for"
 @get_index external getProperty: (globalObject, symbol) => Nullable.t<'a> = ""
 
+// Resolved on every call, never at module load: the host installs its hooks
+// on globalThis under Symbol.for(name), and in ESM an import is evaluated
+// before the importing module's own statements, so a load-time lookup would
+// pin the fallback for any host that installs after importing envio. A
+// property read per event is nothing next to the source request or batch it
+// describes.
 let get = (name, fallback) =>
   switch getProperty(globalObject, symbolFor(name))->Nullable.toOption {
   | Some(hook) => hook
   | None => fallback
   }
 
-let recordSourceRateLimit: (int, int) => unit = get("dlmm.chain-indexer.source-rate-limit", (
-  _,
-  _,
-) => ())
+let noop2 = (_, _) => ()
+let noop1 = _ => ()
 
-let recordSourceRequest: (string, string) => unit = get("dlmm.chain-indexer.source-request-event", (
-  _,
-  _,
-) => ())
+let recordSourceRateLimit = (retry: int, waitMs: int): unit =>
+  get("dlmm.chain-indexer.source-rate-limit", noop2)(retry, waitMs)
 
-let recordSourcePage: (int, int) => unit = get("dlmm.chain-indexer.source-page-result", (_, _) =>
-  ()
-)
+let recordSourceRequest = (event: string, partitionId: string): unit =>
+  get("dlmm.chain-indexer.source-request-event", noop2)(event, partitionId)
 
-let recordSourceRange: (string, int) => unit = get("dlmm.chain-indexer.source-range-request", (
-  _,
-  _,
-) => ())
+let recordSourcePage = (requestedBlocks: int, fetchedBlocks: int): unit =>
+  get("dlmm.chain-indexer.source-page-result", noop2)(requestedBlocks, fetchedBlocks)
+
+let recordSourceRange = (reason: string, blocks: int): unit =>
+  get("dlmm.chain-indexer.source-range-request", noop2)(reason, blocks)
 
 // One query gave up its retry budget and was released for re-planning. A
 // counter on this is how a permanently degraded source shows up: the indexer
 // keeps going, so nothing else does.
-let recordSourceQueryExhausted: string => unit = get(
-  "dlmm.chain-indexer.source-query-exhausted",
-  _ => (),
-)
+let recordSourceQueryExhausted = (partitionId: string): unit =>
+  get("dlmm.chain-indexer.source-query-exhausted", noop1)(partitionId)
 
 type fetchSchedulerPartitionSnapshot = {
   partitionId: string,
@@ -60,19 +60,16 @@ type fetchSchedulerSnapshot = {
   partitions: array<fetchSchedulerPartitionSnapshot>,
 }
 
-let recordFetchScheduler: (unit => fetchSchedulerSnapshot) => unit = get(
-  "dlmm.chain-indexer.fetch-scheduler-snapshot",
-  _ => (),
-)
+let recordFetchScheduler = (snapshot: unit => fetchSchedulerSnapshot): unit =>
+  get("dlmm.chain-indexer.fetch-scheduler-snapshot", noop1)(snapshot)
 
 type pipelineSnapshot = {queueBatches: int, queueItems: int}
 
-let recordPipeline: (string, pipelineSnapshot) => unit = get("dlmm.chain-indexer.pipeline-event", (
-  _,
-  _,
-) => ())
+let recordPipeline = (event: string, snapshot: pipelineSnapshot): unit =>
+  get("dlmm.chain-indexer.pipeline-event", noop2)(event, snapshot)
 
-let recordPoolConfig: int => unit = get("dlmm.chain-indexer.pool-config", _ => ())
+let recordPoolConfig = (maxConnections: int): unit =>
+  get("dlmm.chain-indexer.pool-config", noop1)(maxConnections)
 
 let tracePhase = (phase, callback, ~attributes: dict<int>=Dict.make()) => {
   let hook: (string, unit => 'a, dict<int>) => 'a = get("dlmm.chain-indexer.trace-phase", (
