@@ -4,6 +4,18 @@ open Internal
 let testApiToken = Env.envioApiToken->Option.getOr("")
 let hasLiveApiToken = testApiToken !== "" && testApiToken !== "offline-tests"
 
+// A case that talks to a live endpoint: skipped in offline runs, and retried
+// as upstream configured it when a real token makes it run.
+let itLive = (name, ~retry=?, body) =>
+  if hasLiveApiToken {
+    switch retry {
+    | Some(retry) => Async.itWithOptions(name, {retry: retry}, body)
+    | None => Async.it(name, body)
+    }
+  } else {
+    Async.it_skip(name, body)
+  }
+
 let mockLog = (
   ~transactionHash="0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef",
 ): Rpc.GetLogs.log => {
@@ -48,7 +60,7 @@ describe("RpcSource - name", () => {
 })
 
 describe("RpcSource - getHeightOrThrow", () => {
-  Async.it_skipIf(!hasLiveApiToken)("Returns the current height of the chain", async t => {
+  itLive("Returns the current height of the chain", ~retry=3, async t => {
     let source = RpcSource.make({
       url: `https://eth.rpc.hypersync.xyz/${testApiToken}`,
       chainId: 1337->ChainId.fromInt,
@@ -231,9 +243,9 @@ describe("RpcSource - getEventTransactionOrThrow", () => {
     },
   )
 
-  Async.itWithOptions(
+  itLive(
     "Successfully fetches ZKSync EIP-712 transactions (type 0x71) with optional signature fields",
-    {retry: 3},
+    ~retry=3,
     async t => {
       // Transaction from Abstract Testnet (ZKSync-based) that lacks r/s/v signature fields
       let testTransactionHash = "0x245134326b7fecdcb7e0ed0a6cf090fc8881a63420ecd329ef645686b85647ed"

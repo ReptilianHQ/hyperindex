@@ -1816,7 +1816,9 @@ Retries 2 times on fallback, switches back to sync (oldest lastFailedAt).
         [#getHeightOrThrow, #getItemsOrThrow],
         ~sourceFor=Fallback,
       )
-      let recoveryTimeout = 5.0
+      // Long enough that the three zero-backoff retries below cannot span it
+      // on a loaded runner (5ms did, and the primary "recovered" mid-test).
+      let recoveryTimeout = 200.0
       let sourceManager = SourceManager.make(
         ~isRealtime=false,
         ~recoveryTimeout,

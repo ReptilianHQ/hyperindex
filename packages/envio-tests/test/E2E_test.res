@@ -1448,7 +1448,7 @@ describe("E2E tests", () => {
   )
 
   partitionScenario->Scenario.it(
-    "Partitions too far apart fetch separately, then merge once they are in range",
+    "Partitions too far apart coalesce at registration: the later one carries both addresses and the earlier one retires before it",
     ~sources=[{chain: 1337, methods}],
     async (~t, ~indexer, ~source) => {
       let sourceMock = source(1337)

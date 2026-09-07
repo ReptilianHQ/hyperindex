@@ -58,7 +58,12 @@ jobs:
             fi
           fi
           run_id=""
-          for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/build_and_verify.yml/runs?head_sha=${release_sha}&status=completed&per_page=10" --jq '.workflow_runs[].id'); do
+          # Only runs of the `push` to main count. Build & Verify also runs on
+          # pull_request_target, and GitHub records those runs under the base
+          # branch's head_sha while their artifacts are built from the PR head,
+          # so without this filter a PR run could hand its npm-pkg-envio artifact
+          # to the release.
+          for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/build_and_verify.yml/runs?head_sha=${release_sha}&event=push&status=completed&per_page=10" --jq '.workflow_runs[] | select(.head_branch == "main") | .id'); do
             # TEMPORARY: hypersync-health-check is excluded from this release gate.
             # It probes every supported public EVM HyperSync endpoint, so an
             # unrelated endpoint outage (currently chain 255) can fail independently
@@ -73,7 +78,7 @@ jobs:
             fi
           done
           if [ -z "$run_id" ]; then
-            echo "No fully successful deterministic Build & Verify run found for ${{ github.sha }}"
+            echo "No fully successful deterministic Build & Verify push run found for ${release_sha}"
             exit 1
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
