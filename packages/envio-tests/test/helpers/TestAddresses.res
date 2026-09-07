@@ -203,9 +203,11 @@ let partitions = (optimizedPartitions: FetchState.OptimizedPartitions.t) => {
   entities: optimizedPartitions.entities->Utils.Dict.mapValues(partition),
 }
 
-// Query provenance is validated separately (SourceManager_test, RateLimit_test,
-// the threshold properties); structural fixtures carry this value on both
-// sides so `query` can normalize it out.
+// Query provenance is validated separately (SourceManager_test on raw mock
+// calls, the threshold properties on the compiled strings); structural
+// fixtures carry this value on both sides so `query` can normalize it out.
+// Never assert it: an expectation written as Adaptive against a normalized
+// actual passes whatever the real reason was.
 let anyRangeReason: FetchState.rangeReason = FetchState.Adaptive
 
 let query = (q: FetchState.query): FetchState.query => {
