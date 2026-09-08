@@ -261,6 +261,13 @@ let makeInternal = (
     }
   })
 
+  if (
+    onBlockRegistrations->Array.some(reg => reg.includeTimestamp->Option.getOr(false)) &&
+      fetchState.optimizedPartitions->FetchState.OptimizedPartitions.count == 0
+  ) {
+    JsError.throwWithMessage("includeTimestamp requires an active event fetch partition")
+  }
+
   // Create sources lazily here - this is where API token validation happens
   let chainId = chainConfig.id
   let sources = switch chainConfig.sourceConfig {
@@ -279,6 +286,7 @@ let makeInternal = (
     })
     EvmChain.makeSources(
       ~chainId,
+      ~onBlockRegistrations,
       ~onEventRegistrations=onEventRegistrations->(
         Utils.magic: array<Internal.onEventRegistration> => array<Internal.evmOnEventRegistration>
       ),
@@ -837,9 +845,7 @@ let groupBatchItems = (items: array<Internal.item>): (transactionGroups, blockGr
           blockItemGroups->Array.push([eventItem])
         }
       }
-    // onBlock items build their block from the handler's own block number, not
-    // from the stores - which is what lets the sources keep only the blocks and
-    // transactions an event item references.
+    // Block callback timestamps are materialised separately at batch prep.
     | Internal.Block(_) => ()
     }
   )
@@ -904,12 +910,46 @@ let applyBlockGroups = async (store: BlockStore.t, g: blockGroups) => {
 // batch's items at batch prep (the persistent-store path). A single pass over
 // `items` (`groupBatchItems`) builds both stores' selection masks before the
 // two independent materialize calls run concurrently.
+@get external getSourceTimestamp: Internal.eventBlock => Nullable.t<int> = "timestamp"
+
+let materializeBlockTimestamps = async (store, items) => {
+  let blockItems = items->Array.filter(item =>
+    switch item {
+    | Internal.Block({onBlockRegistration}) =>
+      onBlockRegistration.includeTimestamp->Option.getOr(false)
+    | _ => false
+    }
+  )
+  if blockItems->Utils.Array.notEmpty {
+    let mask = Evm.eventBlockFieldMask(Utils.Set.fromArray(["timestamp"]))
+    let blocks = await store->BlockStore.materialize(
+      ~blockNumbers=blockItems->Array.map(Internal.getItemBlockNumber),
+      ~masks=blockItems->Array.map(_ => mask),
+    )
+    blockItems->Array.forEachWithIndex((item, i) => {
+      let timestamp = blocks->Array.getUnsafe(i)->getSourceTimestamp->Nullable.toOption
+      if timestamp->Option.isNone {
+        JsError.throwWithMessage("Required onBlock source timestamp is unavailable")
+      }
+      item->Internal.setItemBlockTimestamp(timestamp)
+    })
+  }
+}
+
 let materializeBatchItems = async (cs: t, ~items: array<Internal.item>) => {
   let (txGroups, blockGroups) = items->groupBatchItems
   let _ = await Promise.all2((
     cs.transactionStore->applyTransactionGroups(txGroups),
     cs.blockStore->applyBlockGroups(blockGroups),
   ))
+  if (
+    switch cs.chainConfig.sourceConfig {
+    | Config.EvmSourceConfig(_) => true
+    | _ => false
+    }
+  ) {
+    await materializeBlockTimestamps(cs.blockStore, items)
+  }
 }
 
 // Materialise a fetch-response's transactions and blocks onto its items before

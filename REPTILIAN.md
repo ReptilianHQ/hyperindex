@@ -26,6 +26,19 @@ the application-specific runtime behavior that upstream does not provide:
   handling (`ENVIO_SOURCE_BLOCKS_PER_REQUEST`, historical only);
 - optional `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` coalescing after realtime is
   reached, without delaying historical backfill or RPC realtime fetching;
+- EVM `onBlock` callbacks can opt into `includeTimestamp: true` to expose
+  `block.timestamp` in chain seconds. This requires a HyperSync-only chain
+  with event registrations; unsupported sources and block-only indexers fail
+  at registration. The default is false, preserving existing query selection.
+  HyperSync event queries overlapping a registered block callback's range
+  request all headers, including empty blocks, and reject incomplete header
+  ranges. Timestamps use the chain's existing block store and are discarded on
+  rollback, then read again from replacement headers. Queries before the
+  registration's start block retain their existing selection. Callbacks with
+  timestamp selection disabled leave the field undefined. Missing required
+  timestamps fail closed. This runtime registration option does not change
+  event field selection or persisted schema identity, so a replay can keep it
+  off until live heartbeat activation;
 - low-cardinality source, pipeline, PostgreSQL, and phase telemetry hooks
   (`RuntimeHooks`, bound through `globalThis` symbols by the host). Every hook
   is resolved per call, so the host may install its symbols before or after

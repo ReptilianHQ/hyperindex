@@ -311,13 +311,7 @@ let addOnEventRegistration = (
         ),
       )
     | Svm =>
-      Some(
-        EventConfigBuilder.resolveSvmInlineFieldSelection(
-          fields,
-          ~contractName,
-          ~eventName,
-        ),
-      )
+      Some(EventConfigBuilder.resolveSvmInlineFieldSelection(fields, ~contractName, ~eventName))
     | Fuel =>
       JsError.throwWithMessage(
         `The fields option of the "${eventName}" event registration on contract "${contractName}" is only supported on EVM. Select the fields in your config instead.`,
@@ -602,6 +596,16 @@ let finishRegistration = (~config: Config.t): registrationsByChainId => {
 
         validateRpcFieldSelection(chainConfig, onEventRegistrations)
 
+        let blockRegs = (r->getChainRegistrations(~chainId)).onBlockRegistrations
+        if (
+          onEventRegistrations->Utils.Array.isEmpty &&
+            blockRegs->Array.some(reg => reg.includeTimestamp->Option.getOr(false))
+        ) {
+          JsError.throwWithMessage(
+            "includeTimestamp requires an event registration on the same chain",
+          )
+        }
+
         registrationsByChainId->Dict.set(
           key,
           {
@@ -722,6 +726,7 @@ type onBlockWhereArgs = {chain: unknown}
 let registerOnBlock = (
   ~name: string,
   ~where: unknown,
+  ~includeTimestamp=false,
   ~handler: Internal.onBlockArgs => promise<unit>,
   ~getChainsObject: Config.t => dict<unknown>,
 ) => {
@@ -782,6 +787,12 @@ let registerOnBlock = (
       }
 
       if shouldRegister {
+        if includeTimestamp {
+          switch chainConfig.sourceConfig {
+          | Config.EvmSourceConfig({hypersync: Some(_), rpcs: []}) => ()
+          | _ => JsError.throwWithMessage("includeTimestamp requires an EVM HyperSync-only source")
+          }
+        }
         matchedAny := true
         if range._gte->Option.getOr(chainConfig.startBlock) < chainConfig.startBlock {
           JsError.throwWithMessage(
@@ -804,6 +815,7 @@ let registerOnBlock = (
             {
               index: chainRegs.onBlockRegistrations->Array.length,
               name,
+              includeTimestamp: ?(includeTimestamp ? Some(true) : None),
               startBlock: range._gte,
               endBlock: range._lte,
               interval: range._every,

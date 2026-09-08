@@ -87,12 +87,22 @@ let getItemLogger = {
 let getItemUserLogger = (item: Internal.item, ~ecosystem: t): Envio.logger =>
   getItemLogger(item, ~ecosystem)->Logging.userLogger
 
-let makeOnBlockArgs = (~blockNumber: int, ~ecosystem: t, ~context): Internal.onBlockArgs => {
+let makeOnBlockArgs = (
+  ~blockNumber: int,
+  ~timestamp=?,
+  ~ecosystem: t,
+  ~context,
+): Internal.onBlockArgs => {
   switch ecosystem.name {
   | Svm => {slot: blockNumber, context}
   | _ => {
       let blockEvent = Dict.make()
       blockEvent->Dict.set(ecosystem.blockNumberName, blockNumber->(Utils.magic: int => unknown))
+      if ecosystem.name == Evm {
+        timestamp->Option.forEach(value =>
+          blockEvent->Dict.set("timestamp", value->(Utils.magic: int => unknown))
+        )
+      }
       {block: blockEvent->(Utils.magic: dict<unknown> => Internal.blockEvent), context}
     }
   }

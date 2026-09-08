@@ -378,10 +378,16 @@ let getGlobalIndexer = (): 'indexer => {
 
   let onBlockFn = (rawOptions: 'a, handler: 'b) => {
     HandlerRegister.throwIfFinishedRegistration(~methodName="onBlock")
-    let raw = rawOptions->(Utils.magic: 'a => {"name": string, "where": unknown})
+    let raw =
+      rawOptions->(
+        Utils.magic: 'a => {"name": string, "where": unknown, "includeTimestamp": unknown}
+      )
     HandlerRegister.registerOnBlock(
       ~name=raw["name"],
       ~where=raw["where"],
+      ~includeTimestamp=raw["includeTimestamp"]
+      ->S.parseOrThrow(S.option(S.bool))
+      ->Option.getOr(false),
       ~handler=handler->(Utils.magic: 'b => Internal.onBlockArgs => promise<unit>),
       ~getChainsObject=config => {
         let (chains, _) = buildChainsObject(~config)

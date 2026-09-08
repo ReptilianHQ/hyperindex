@@ -81,7 +81,7 @@ let onEventRegistrations = () => {
   )
 }
 
-let makeSource = (~url, ~lowercaseAddresses=true) => {
+let makeSource = (~url, ~lowercaseAddresses=true, ~onBlockRegistrations=[]) => {
   let addressStore = AddressStore.make(
     ~ecosystem=Ecosystem.Evm,
     ~shouldChecksum=!lowercaseAddresses,
@@ -98,6 +98,7 @@ let makeSource = (~url, ~lowercaseAddresses=true) => {
     chainId: 1->ChainId.fromInt,
     endpointUrl: url,
     onEventRegistrations: onEventRegistrations(),
+    onBlockRegistrations,
     apiToken: Some(MockHyperSyncServer.apiToken),
     clientTimeoutMillis: 10_000,
     lowercaseAddresses,
@@ -132,7 +133,9 @@ let fetch = (source: Source.t, ~addressSet, ~fromBlock=10, ~toBlock=Some(11)) =>
 let page: MockHyperSyncServer.page = {
   blocks: [
     JSON.parseOrThrow(
-      `{"number":10,"timestamp":1700000000,"hash":"${blockHash(10)}","parent_hash":"${parentHash}","miner":"${minerAddress}","state_root":"${stateRoot}"}`,
+      `{"number":10,"timestamp":1700000000,"hash":"${blockHash(
+          10,
+        )}","parent_hash":"${parentHash}","miner":"${minerAddress}","state_root":"${stateRoot}"}`,
     ),
     JSON.parseOrThrow(
       `{"number":11,"timestamp":1700000012,"hash":"${blockHash(11)}","parent_hash":"${blockHash(
@@ -201,15 +204,19 @@ let eventSummary = (item: Internal.item) =>
 
 describe("HyperSync source contract", () => {
   Async.it("sends one query carrying every registration's selection", async t => {
-    let queries = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushResponse(page)
-      let _ = await source->fetch(~addressSet)
-      server->MockHyperSyncServer.takeQueries
-    })
+    let queries = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushResponse(page)
+        let _ = await source->fetch(~addressSet)
+        server->MockHyperSyncServer.takeQueries
+      },
+    )
 
     t.expect(queries).toEqual([
-      JSON.parseOrThrow(`{
+      JSON.parseOrThrow(
+        `{
         "from_block": 10,
         "to_block": 12,
         "logs": [
@@ -234,22 +241,26 @@ describe("HyperSync source contract", () => {
           ]
         },
         "max_num_logs": 5000
-      }`),
+      }`,
+      ),
     ])
   })
 
   Async.it("materialises the selected fields onto the page's items", async t => {
-    let items = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushResponse(page)
-      let page = await source->fetch(~addressSet)
-      await ChainState.materializePageItems(
-        ~items=page.parsedQueueItems,
-        ~transactionStore=page.transactionStore,
-        ~blockStore=page.blockStore,
-      )
-      page.parsedQueueItems
-    })
+    let items = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushResponse(page)
+        let page = await source->fetch(~addressSet)
+        await ChainState.materializePageItems(
+          ~items=page.parsedQueueItems,
+          ~transactionStore=page.transactionStore,
+          ~blockStore=page.blockStore,
+        )
+        page.parsedQueueItems
+      },
+    )
 
     // The Approval item shows the selection is per (block, transaction) group,
     // not per page: it gets its own registration's `stateRoot` and none of the
@@ -314,79 +325,93 @@ describe("HyperSync source contract", () => {
   })
 
   Async.it("reads the height off the server", async t => {
-    let height = await MockHyperSyncServer.withServer(~height=42, async server => {
-      let (source, _) = makeSource(~url=server->MockHyperSyncServer.url)
-      let {height} = await source.getHeightOrThrow()
-      height
-    })
+    let height = await MockHyperSyncServer.withServer(
+      ~height=42,
+      async server => {
+        let (source, _) = makeSource(~url=server->MockHyperSyncServer.url)
+        let {height} = await source.getHeightOrThrow()
+        height
+      },
+    )
     t.expect(height).toBe(42)
   })
 
   Async.it("keeps the rollback guard's blocks in the page store", async t => {
-    let missingHashes = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushResponse({
-        ...page,
-        rollbackGuard: JSON.parseOrThrow(
-          `{"blockNumber":20,"timestamp":1700000100,"hash":"${blockHash(
-              20,
-            )}","firstBlockNumber":10,"firstParentHash":"${blockHash(9)}"}`,
-        ),
-      })
-      let page = await source->fetch(~addressSet)
-      // The guard's head block and the parent of the range's first block are
-      // reorg-detection inputs, so they come back hashed alongside the range.
-      page.blockStore->BlockStore.missingHashes([9, 10, 20, 21])
-    })
+    let missingHashes = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushResponse({
+          ...page,
+          rollbackGuard: JSON.parseOrThrow(
+            `{"blockNumber":20,"timestamp":1700000100,"hash":"${blockHash(
+                20,
+              )}","firstBlockNumber":10,"firstParentHash":"${blockHash(9)}"}`,
+          ),
+        })
+        let page = await source->fetch(~addressSet)
+        // The guard's head block and the parent of the range's first block are
+        // reorg-detection inputs, so they come back hashed alongside the range.
+        page.blockStore->BlockStore.missingHashes([9, 10, 20, 21])
+      },
+    )
 
     t.expect(missingHashes).toEqual([21])
   })
 
   Async.it("receives heights pushed over the height stream", async t => {
-    let heights = await MockHyperSyncServer.withServer(~height=7, async server => {
-      let (source, _) = makeSource(~url=server->MockHyperSyncServer.url)
-      let heights = []
-      let subscribe =
-        source.createHeightSubscription->Option.getOrThrow(
-          ~message="HyperSync source must push heights",
-        )
-      let unsubscribe = subscribe(~onHeight=height => heights->Array.push(height)->ignore)
-      while heights->Array.length < 1 {
-        await Utils.delay(10)
-      }
-      server->MockHyperSyncServer.setHeight(9)
-      while heights->Array.length < 2 {
-        await Utils.delay(10)
-      }
-      unsubscribe()
-      heights
-    })
+    let heights = await MockHyperSyncServer.withServer(
+      ~height=7,
+      async server => {
+        let (source, _) = makeSource(~url=server->MockHyperSyncServer.url)
+        let heights = []
+        let subscribe =
+          source.createHeightSubscription->Option.getOrThrow(
+            ~message="HyperSync source must push heights",
+          )
+        let unsubscribe = subscribe(~onHeight=height => heights->Array.push(height)->ignore)
+        while heights->Array.length < 1 {
+          await Utils.delay(10)
+        }
+        server->MockHyperSyncServer.setHeight(9)
+        while heights->Array.length < 2 {
+          await Utils.delay(10)
+        }
+        unsubscribe()
+        heights
+      },
+    )
 
     t.expect(heights).toEqual([7, 9])
   })
 
   Async.it("surfaces a page that withholds a selected field", async t => {
-    let result = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushResponse({
-        ...page,
-        // The query asked for `gas_used`; this page answers without it.
-        transactions: [
-          JSON.parseOrThrow(
-            `{"block_number":10,"transaction_index":3,"hash":"${transactionHash}","to":"${toAddress}"}`,
-          ),
-          JSON.parseOrThrow(
-            `{"block_number":11,"transaction_index":0,"hash":"${transactionHash}","to":"${toAddress}"}`,
-          ),
-        ],
-      })
-      try {
-        let _ = await source->fetch(~addressSet)
-        "no error"
-      } catch {
-      | Source.GetItemsError(FailedGettingItems({retry: ImpossibleForTheQuery({message})})) => message
-      }
-    })
+    let result = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushResponse({
+          ...page,
+          // The query asked for `gas_used`; this page answers without it.
+          transactions: [
+            JSON.parseOrThrow(
+              `{"block_number":10,"transaction_index":3,"hash":"${transactionHash}","to":"${toAddress}"}`,
+            ),
+            JSON.parseOrThrow(
+              `{"block_number":11,"transaction_index":0,"hash":"${transactionHash}","to":"${toAddress}"}`,
+            ),
+          ],
+        })
+        try {
+          let _ = await source->fetch(~addressSet)
+          "no error"
+        } catch {
+        | Source.GetItemsError(FailedGettingItems({
+            retry: ImpossibleForTheQuery({message}),
+          })) => message
+        }
+      },
+    )
 
     t.expect(result).toBe(
       "Source returned invalid data with missing required fields: transaction.gasUsed",
@@ -400,7 +425,8 @@ let failureTag = exn =>
   | Source.SourceBehindHead({blockNumber}) => `behindHead:${blockNumber->Int.toString}`
   | Source.GetItemsError(FailedGettingItems({retry: ImpossibleForTheQuery({message})})) =>
     `impossible:${message}`
-  | Source.GetItemsError(FailedGettingItems({retry: WithBackoff({message})})) => `backoff:${message}`
+  | Source.GetItemsError(FailedGettingItems({retry: WithBackoff({message})})) =>
+    `backoff:${message}`
   | JsExn(jsExn) => `exn:${jsExn->JsExn.message->Option.getOr("")}`
   | _ => "unknown"
   }
@@ -412,45 +438,90 @@ let attempt = async body =>
   }
 
 describe("HyperSync source responses", () => {
+  Async.it("rejects an incomplete header range requested for block callbacks", async t => {
+    let result = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(
+          ~url=server->MockHyperSyncServer.url,
+          ~onBlockRegistrations=[
+            {
+              index: 0,
+              name: "clock",
+              chainId: 1->ChainId.fromInt,
+              includeTimestamp: true,
+              startBlock: Some(10),
+              endBlock: None,
+              interval: 1,
+              handler: async _ => (),
+            },
+          ],
+        )
+        server->MockHyperSyncServer.pushResponse({nextBlock: 12})
+        await attempt(
+          async () => {
+            let _ = await source->fetch(~addressSet)
+            "fetched"
+          },
+        )
+      },
+    )
+    t.expect(result).toBe(
+      "backoff:Unexpected issue while fetching events from HyperSync client. Attempt a retry.",
+    )
+  })
   Async.it("maps a rate-limited response to the wait the manager retries on", async t => {
-    let result = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushRawReply({
-        status: 429,
-        headers: Dict.fromArray([("x-ratelimit-reset", "3"), ("x-ratelimit-remaining", "0")]),
-        body: "slow down",
-      })
-      await attempt(async () => {
-        let _ = await source->fetch(~addressSet)
-        "fetched"
-      })
-    })
+    let result = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushRawReply({
+          status: 429,
+          headers: Dict.fromArray([("x-ratelimit-reset", "3"), ("x-ratelimit-remaining", "0")]),
+          body: "slow down",
+        })
+        await attempt(
+          async () => {
+            let _ = await source->fetch(~addressSet)
+            "fetched"
+          },
+        )
+      },
+    )
     t.expect(result).toBe("rateLimited:3000")
   })
 
   Async.it("reads a page that made no progress as the instance being behind head", async t => {
-    let result = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushResponse({nextBlock: 10})
-      await attempt(async () => {
-        let _ = await source->fetch(~addressSet)
-        "fetched"
-      })
-    })
+    let result = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushResponse({nextBlock: 10})
+        await attempt(
+          async () => {
+            let _ = await source->fetch(~addressSet)
+            "fetched"
+          },
+        )
+      },
+    )
     t.expect(result).toBe("behindHead:10")
   })
 
   Async.it("reports the range a partial page actually covered", async t => {
-    let summary = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushResponse({...page, nextBlock: 11, archiveHeight: 60})
-      let response = await source->fetch(~addressSet, ~fromBlock=10, ~toBlock=Some(11))
-      {
-        "latestFetchedBlockNumber": response.latestFetchedBlockNumber,
-        "knownHeight": response.knownHeight,
-        "items": response.parsedQueueItems->Array.length,
-      }
-    })
+    let summary = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushResponse({...page, nextBlock: 11, archiveHeight: 60})
+        let response = await source->fetch(~addressSet, ~fromBlock=10, ~toBlock=Some(11))
+        {
+          "latestFetchedBlockNumber": response.latestFetchedBlockNumber,
+          "knownHeight": response.knownHeight,
+          "items": response.parsedQueueItems->Array.length,
+        }
+      },
+    )
     t.expect(summary).toEqual({
       "latestFetchedBlockNumber": 10,
       "knownHeight": 60,
@@ -459,75 +530,87 @@ describe("HyperSync source responses", () => {
   })
 
   Async.it("lets the client halve the range on a payload-too-large reply", async t => {
-    let (result, queries) = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushRawReply({status: 413})
-      server->MockHyperSyncServer.pushResponse({nextBlock: 26})
-      let result = await attempt(async () => {
-        let response = await source->fetch(~addressSet, ~fromBlock=10, ~toBlock=Some(41))
-        response.latestFetchedBlockNumber->Int.toString
-      })
-      (
-        result,
-        server
-        ->MockHyperSyncServer.takeQueries
-        ->Array.map(query =>
-          query
-          ->JSON.Decode.object
-          ->Option.flatMap(o => o->Dict.get("to_block"))
-          ->Option.flatMap(JSON.Decode.float)
-        ),
-      )
-    })
+    let (result, queries) = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushRawReply({status: 413})
+        server->MockHyperSyncServer.pushResponse({nextBlock: 26})
+        let result = await attempt(
+          async () => {
+            let response = await source->fetch(~addressSet, ~fromBlock=10, ~toBlock=Some(41))
+            response.latestFetchedBlockNumber->Int.toString
+          },
+        )
+        (
+          result,
+          server
+          ->MockHyperSyncServer.takeQueries
+          ->Array.map(
+            query =>
+              query
+              ->JSON.Decode.object
+              ->Option.flatMap(o => o->Dict.get("to_block"))
+              ->Option.flatMap(JSON.Decode.float),
+          ),
+        )
+      },
+    )
     t.expect((result, queries)).toEqual(("ok:25", [Some(42.), Some(26.)]))
   })
 
   Async.it("drops logs that route to no registration", async t => {
-    let counts = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushResponse({
-        ...page,
-        logs: [
-          // An event neither registration declared.
-          JSON.parseOrThrow(
-            `{"block_number":10,"log_index":1,"transaction_index":3,"address":"${tokenAddress}","data":"0x","topic0":"${blockHash(
-                1,
-              )}"}`,
-          ),
-          // The right event, from an address the partition never registered.
-          JSON.parseOrThrow(
-            `{"block_number":10,"log_index":2,"transaction_index":3,"address":"${minerAddress}","data":"${uint256(
-                1,
-              )}","topic0":"${transferSighash}","topic1":"${fromAddress->padded}","topic2":"${toAddress->padded}"}`,
-          ),
-        ],
-      })
-      let response = await source->fetch(~addressSet)
-      response.parsedQueueItems->Array.length
-    })
+    let counts = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushResponse({
+          ...page,
+          logs: [
+            // An event neither registration declared.
+            JSON.parseOrThrow(
+              `{"block_number":10,"log_index":1,"transaction_index":3,"address":"${tokenAddress}","data":"0x","topic0":"${blockHash(
+                  1,
+                )}"}`,
+            ),
+            // The right event, from an address the partition never registered.
+            JSON.parseOrThrow(
+              `{"block_number":10,"log_index":2,"transaction_index":3,"address":"${minerAddress}","data":"${uint256(
+                  1,
+                )}","topic0":"${transferSighash}","topic1":"${fromAddress->padded}","topic2":"${toAddress->padded}"}`,
+            ),
+          ],
+        })
+        let response = await source->fetch(~addressSet)
+        response.parsedQueueItems->Array.length
+      },
+    )
     t.expect(counts).toBe(0)
   })
 
   Async.it("checksums addresses when the chain does not lowercase them", async t => {
-    let summary = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(
-        ~url=server->MockHyperSyncServer.url,
-        ~lowercaseAddresses=false,
-      )
-      server->MockHyperSyncServer.pushResponse(page)
-      let response = await source->fetch(~addressSet)
-      await ChainState.materializePageItems(
-        ~items=response.parsedQueueItems,
-        ~transactionStore=response.transactionStore,
-        ~blockStore=response.blockStore,
-      )
-      let summary = response.parsedQueueItems->Array.map(eventSummary)->Array.getUnsafe(0)
-      {
-        "param": summary["params"].to->Option.getOrThrow->Address.toString,
-        "transaction": summary["transaction"].to->Option.getOrThrow->Address.toString,
-        "miner": summary["block"].miner->Option.getOrThrow->Address.toString,
-      }
-    })
+    let summary = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(
+          ~url=server->MockHyperSyncServer.url,
+          ~lowercaseAddresses=false,
+        )
+        server->MockHyperSyncServer.pushResponse(page)
+        let response = await source->fetch(~addressSet)
+        await ChainState.materializePageItems(
+          ~items=response.parsedQueueItems,
+          ~transactionStore=response.transactionStore,
+          ~blockStore=response.blockStore,
+        )
+        let summary = response.parsedQueueItems->Array.map(eventSummary)->Array.getUnsafe(0)
+        {
+          "param": summary["params"].to->Option.getOrThrow->Address.toString,
+          "transaction": summary["transaction"].to->Option.getOrThrow->Address.toString,
+          "miner": summary["block"].miner->Option.getOrThrow->Address.toString,
+        }
+      },
+    )
     // Checksummed on the way out of the client, from the same lowercase rows
     // the other tests read back verbatim.
     t.expect(summary).toEqual({
@@ -540,65 +623,71 @@ describe("HyperSync source responses", () => {
   // Reorg rollback is the only caller of this path, and it went through a
   // detached napi method reference until this test called it.
   Async.it("paginates the block-hash query", async t => {
-    let queries = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, _) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushResponse({
-        blocks: [JSON.parseOrThrow(`{"number":10,"hash":"${blockHash(10)}"}`)],
-        nextBlock: 11,
-      })
-      server->MockHyperSyncServer.pushResponse({
-        blocks: [
-          JSON.parseOrThrow(`{"number":10,"hash":"${blockHash(10)}"}`),
-          JSON.parseOrThrow(`{"number":11,"hash":"${blockHash(11)}"}`),
-          JSON.parseOrThrow(`{"number":12,"hash":"${blockHash(12)}"}`),
-        ],
-        nextBlock: 13,
-      })
-      let {result} =
-        await source.getBlockHashes(
+    let queries = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, _) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushResponse({
+          blocks: [JSON.parseOrThrow(`{"number":10,"hash":"${blockHash(10)}"}`)],
+          nextBlock: 11,
+        })
+        server->MockHyperSyncServer.pushResponse({
+          blocks: [
+            JSON.parseOrThrow(`{"number":10,"hash":"${blockHash(10)}"}`),
+            JSON.parseOrThrow(`{"number":11,"hash":"${blockHash(11)}"}`),
+            JSON.parseOrThrow(`{"number":12,"hash":"${blockHash(12)}"}`),
+          ],
+          nextBlock: 13,
+        })
+        let {result} = await source.getBlockHashes(
           ~blockNumbers=[10, 12],
           ~logger=Logging.createChild(~params={"test": "block hashes"}),
         )
-      let missing = switch result {
-      | Ok(store) => store->BlockStore.missingHashes([10, 11, 12, 13])->Array.map(n => n->Int.toString)
-      | Error(exn) => [failureTag(exn)]
-      }
-      (server->MockHyperSyncServer.takeQueries, missing)
-    })
+        let missing = switch result {
+        | Ok(store) =>
+          store->BlockStore.missingHashes([10, 11, 12, 13])->Array.map(n => n->Int.toString)
+        | Error(exn) => [failureTag(exn)]
+        }
+        (server->MockHyperSyncServer.takeQueries, missing)
+      },
+    )
     t.expect(queries).toEqual((
       [
-        JSON.parseOrThrow(
-          `{"from_block":10,"to_block":13,"include_all_blocks":true,"field_selection":{"block":["hash","number"]}}`,
-        ),
-        JSON.parseOrThrow(
-          `{"from_block":10,"to_block":13,"include_all_blocks":true,"field_selection":{"block":["hash","number"]}}`,
-        ),
+        JSON.parseOrThrow(`{"from_block":10,"to_block":13,"include_all_blocks":true,"field_selection":{"block":["hash","number"]}}`),
+        JSON.parseOrThrow(`{"from_block":10,"to_block":13,"include_all_blocks":true,"field_selection":{"block":["hash","number"]}}`),
       ],
       ["13"],
     ))
   })
 
   Async.it("surfaces a page that withholds a selected block field", async t => {
-    let result = await MockHyperSyncServer.withServer(~height=100, async server => {
-      let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
-      server->MockHyperSyncServer.pushResponse({
-        ...page,
-        blocks: [
-          JSON.parseOrThrow(
-            `{"number":10,"timestamp":1700000000,"hash":"${blockHash(10)}","parent_hash":"${parentHash}","state_root":"${stateRoot}"}`,
-          ),
-          JSON.parseOrThrow(
-            `{"number":11,"timestamp":1700000012,"hash":"${blockHash(
-                11,
-              )}","parent_hash":"${blockHash(10)}","state_root":"${stateRoot}"}`,
-          ),
-        ],
-      })
-      await attempt(async () => {
-        let _ = await source->fetch(~addressSet)
-        "fetched"
-      })
-    })
+    let result = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)
+        server->MockHyperSyncServer.pushResponse({
+          ...page,
+          blocks: [
+            JSON.parseOrThrow(
+              `{"number":10,"timestamp":1700000000,"hash":"${blockHash(
+                  10,
+                )}","parent_hash":"${parentHash}","state_root":"${stateRoot}"}`,
+            ),
+            JSON.parseOrThrow(
+              `{"number":11,"timestamp":1700000012,"hash":"${blockHash(
+                  11,
+                )}","parent_hash":"${blockHash(10)}","state_root":"${stateRoot}"}`,
+            ),
+          ],
+        })
+        await attempt(
+          async () => {
+            let _ = await source->fetch(~addressSet)
+            "fetched"
+          },
+        )
+      },
+    )
     t.expect(result).toBe(
       "impossible:Source returned invalid data with missing required fields: block.miner",
     )
