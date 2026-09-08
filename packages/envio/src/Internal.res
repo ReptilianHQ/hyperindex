@@ -703,6 +703,7 @@ type onBlockArgs = {
 }
 
 type onBlockRegistration = {
+  includeTimestamp?: bool,
   // When there are multiple onBlock handlers per chain,
   // we want to use the order they are defined for sorting
   index: int,
@@ -731,7 +732,9 @@ type item =
       transactionIndex: int,
       payload: eventPayload,
     })
-  | @as(1) Block({onBlockRegistration: onBlockRegistration, blockNumber: int})
+  | @as(1) Block({onBlockRegistration: onBlockRegistration, blockNumber: int, timestamp?: int})
+
+@set external setItemBlockTimestamp: (item, option<int>) => unit = "timestamp"
 
 external castUnsafeEventItem: item => eventItem = "%identity"
 

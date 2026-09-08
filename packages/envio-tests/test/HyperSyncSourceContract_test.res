@@ -81,7 +81,7 @@ let onEventRegistrations = () => {
   )
 }
 
-let makeSource = (~url, ~lowercaseAddresses=true) => {
+let makeSource = (~url, ~lowercaseAddresses=true, ~onBlockRegistrations=[]) => {
   let addressStore = AddressStore.make(
     ~ecosystem=Ecosystem.Evm,
     ~shouldChecksum=!lowercaseAddresses,
@@ -98,6 +98,7 @@ let makeSource = (~url, ~lowercaseAddresses=true) => {
     chainId: 1->ChainId.fromInt,
     endpointUrl: url,
     onEventRegistrations: onEventRegistrations(),
+    onBlockRegistrations,
     apiToken: Some(MockHyperSyncServer.apiToken),
     clientTimeoutMillis: 10_000,
     lowercaseAddresses,
@@ -412,6 +413,38 @@ let attempt = async body =>
   }
 
 describe("HyperSync source responses", () => {
+  Async.it("rejects an incomplete header range requested for block callbacks", async t => {
+    let result = await MockHyperSyncServer.withServer(
+      ~height=100,
+      async server => {
+        let (source, addressSet) = makeSource(
+          ~url=server->MockHyperSyncServer.url,
+          ~onBlockRegistrations=[
+            {
+              index: 0,
+              name: "clock",
+              chainId: 1->ChainId.fromInt,
+              includeTimestamp: true,
+              startBlock: Some(10),
+              endBlock: None,
+              interval: 1,
+              handler: async _ => (),
+            },
+          ],
+        )
+        server->MockHyperSyncServer.pushResponse({nextBlock: 12})
+        await attempt(
+          async () => {
+            let _ = await source->fetch(~addressSet)
+            "fetched"
+          },
+        )
+      },
+    )
+    t.expect(result).toBe(
+      "backoff:Unexpected issue while fetching events from HyperSync client. Attempt a retry.",
+    )
+  })
   Async.it("maps a rate-limited response to the wait the manager retries on", async t => {
     let result = await MockHyperSyncServer.withServer(~height=100, async server => {
       let (source, addressSet) = makeSource(~url=server->MockHyperSyncServer.url)

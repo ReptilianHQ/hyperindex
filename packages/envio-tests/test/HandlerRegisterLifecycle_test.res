@@ -125,6 +125,20 @@ describe("HandlerRegister — onBlock validation at registration", () => {
     )
   })
 
+  it("rejects timestamp opt-in on an RPC source", t => {
+    t->toThrowErrorEqual(
+      () =>
+        HandlerRegister.registerOnBlock(
+          ~name="timestamp",
+          ~where=%raw(`undefined`),
+          ~includeTimestamp=true,
+          ~handler=noopBlockHandler,
+          ~getChainsObject,
+        ),
+      "includeTimestamp requires an EVM HyperSync-only source",
+    )
+  })
+
   it("throws when where returns a filter with unknown fields", t => {
     t->toThrowErrorEqual(
       () =>

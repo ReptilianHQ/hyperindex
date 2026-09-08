@@ -225,6 +225,7 @@ impl EvmHyperSyncClient {
                     .collect(),
             ),
             max_num_logs: params.max_num_logs,
+            include_all_blocks: params.include_all_blocks,
             field_selection: query::FieldSelection {
                 block: Some(validated_block_fields.clone()),
                 transaction: Some(transaction_fields),
@@ -259,6 +260,20 @@ impl EvmHyperSyncClient {
         };
 
         let transaction_store = TransactionStore::new_evm(self.enable_checksum_addresses);
+        if params.include_all_blocks.unwrap_or(false) {
+            let numbers: HashSet<u64> = response
+                .data
+                .blocks
+                .iter()
+                .flatten()
+                .filter_map(|b| b.number)
+                .collect();
+            if (params.from_block as u64..response.next_block).any(|n| !numbers.contains(&n)) {
+                return Err(napi::Error::from_reason(
+                    "HyperSync omitted a requested block header",
+                ));
+            }
+        }
         let block_store = BlockStore::new_evm(self.enable_checksum_addresses);
         let items = tokio::task::block_in_place(|| {
             process_response(
@@ -318,6 +333,7 @@ impl EvmHyperSyncClient {
 /// internally from the registrations passed at construction and the set.
 #[napi(object)]
 pub struct EventItemsQuery {
+    pub include_all_blocks: Option<bool>,
     pub from_block: i64,
     /// Inclusive; `None` queries to the end of available data.
     pub to_block: Option<i64>,
@@ -588,8 +604,8 @@ fn process_response(
 
     // Full fields for referenced blocks, whose trio and any selected fields
     // decode from the store like any other field. Blocks whose logs were all
-    // dropped by client-side routing keep a hash-only row so every returned
-    // header still backs reorg detection.
+    // dropped by client-side routing keep their hash and timestamp, backing
+    // reorg detection and onBlock callbacks without retaining other fields.
     let store_blocks: Vec<simple_types::Block> = response_blocks
         .into_iter()
         .map(|b| {
@@ -601,6 +617,7 @@ fn process_response(
                 simple_types::Block {
                     number: b.number,
                     hash: b.hash,
+                    timestamp: b.timestamp,
                     ..Default::default()
                 }
             }
@@ -806,6 +823,46 @@ mod tests {
     use crate::address_store::test_support::{evm_store, set_of};
     use crate::field_columns::test_support::str_column;
     use hypersync_client::simple_types;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_block_timestamp_is_replaced_after_rollback() {
+        use crate::field_columns::{test_support::column, Column};
+        let store = BlockStore::new_evm(false);
+        let mask = (1u64 << (crate::block_store::EvmBlockField::Timestamp as u32)) as f64;
+        let mut observed = Vec::new();
+        for timestamp in [100u64, 200] {
+            let page = BlockStore::new_evm(false);
+            process_response(
+                vec![vec![simple_types::Block {
+                    number: Some(20),
+                    hash: Some(Default::default()),
+                    timestamp: Some(timestamp.into()),
+                    ..Default::default()
+                }]],
+                vec![],
+                vec![],
+                &empty_decoder(),
+                false,
+                REQUIRED_BLOCK_FIELDS,
+                &[],
+                &TransactionStore::new_evm(false),
+                &page,
+                empty_set().cache(),
+            )
+            .expect("decode empty block");
+            store.merge(&page, 0, false).expect("merge replacement");
+            let values = store
+                .materialize(vec![20], vec![mask])
+                .await
+                .expect("materialize timestamp");
+            match column(&values, "timestamp") {
+                Some(Column::I64(v)) => observed.push(v.clone()),
+                _ => panic!("missing timestamp column"),
+            }
+            store.rollback(19);
+        }
+        assert_eq!(observed, vec![vec![Some(100)], vec![Some(200)]]);
+    }
 
     fn empty_decoder() -> SelectionDecoder {
         Decoder::from_registrations(&[], false, &evm_store(&[]))

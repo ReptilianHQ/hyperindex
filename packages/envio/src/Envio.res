@@ -112,6 +112,7 @@ type onBlockWhereArgs<'chain> = {chain: 'chain}
 //   - a filter object whose shape is ecosystem-specific (see the `Evm*` /
 //     `Fuel*` / `Svm*` `OnBlock`/`OnSlot` types in `packages/envio/index.d.ts`)
 type onBlockOptions<'chain> = {
+  includeTimestamp?: bool,
   name: string,
   where?: onBlockWhereArgs<'chain> => unknown,
 }

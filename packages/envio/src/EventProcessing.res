@@ -91,7 +91,7 @@ let runHandlerOrThrow = async (
   ~chains: Internal.chains,
 ) => {
   switch item {
-  | Block({onBlockRegistration: {handler}, blockNumber}) =>
+  | Block({onBlockRegistration: {handler}, blockNumber, ?timestamp}) =>
     try {
       let contextParams: UserContext.contextParams = {
         item,
@@ -107,6 +107,7 @@ let runHandlerOrThrow = async (
       await handler(
         Ecosystem.makeOnBlockArgs(
           ~blockNumber,
+          ~timestamp?,
           ~ecosystem=config.ecosystem,
           ~context=UserContext.getHandlerContext(contextParams),
         ),
@@ -206,12 +207,13 @@ let preloadBatchOrThrow = async (
           | _ => ()
           }
         }
-      | Block({onBlockRegistration: {handler}, blockNumber}) =>
+      | Block({onBlockRegistration: {handler}, blockNumber, ?timestamp}) =>
         try {
           promises->Array.push(
             handler({
               Ecosystem.makeOnBlockArgs(
                 ~blockNumber,
+                ~timestamp?,
                 ~ecosystem=config.ecosystem,
                 ~context=UserContext.getHandlerContext({
                   item,
@@ -355,7 +357,9 @@ let processEventBatch = async (
     if batch.items->Utils.Array.notEmpty {
       // Materialise store-backed transactions onto payloads before any handler
       // (preload or execute) reads them.
-      await RuntimeHooks.tracePhase("materialize", () => materializeBatchEvents(batch, ~chainStates))
+      await RuntimeHooks.tracePhase("materialize", () =>
+        materializeBatchEvents(batch, ~chainStates)
+      )
       await RuntimeHooks.tracePhase("preload", () =>
         batch->preloadBatchOrThrow(~loadManager, ~persistence, ~indexerState, ~chains, ~config)
       )

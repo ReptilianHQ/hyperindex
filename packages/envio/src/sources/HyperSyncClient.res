@@ -262,6 +262,7 @@ module EventItems = {
     // depend on addresses (client-side filtering). None/empty means
     // every address-dependent contract is filtered server-side.
     clientFilteredContracts: option<array<string>>,
+    includeAllBlocks?: bool,
   }
 
   type item = {
@@ -289,9 +290,7 @@ module EventItems = {
 type t = {
   // Block-hash query construction and pagination live in Rust; only the
   // aggregate response store crosses the boundary.
-  getBlockHashes: (
-    ~blockNumbers: array<int>,
-  ) => promise<(BlockStore.t, array<RequestStat.t>)>,
+  getBlockHashes: (~blockNumbers: array<int>) => promise<(BlockStore.t, array<RequestStat.t>)>,
   // Returns the response plus page stores owning this page's raw transactions
   // and blocks.
   getEventItems: (
