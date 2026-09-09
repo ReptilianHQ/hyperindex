@@ -65,3 +65,35 @@ is a recovery path only: it re-publishes the runtime package of an existing tag
 from that tag's verified artifact and does not rebuild the native packages. The
 npm package is consumed through an alias so application imports and the CLI
 remain named `envio`.
+
+## PostgreSQL write locality
+
+Entity batches sort their deduplicated IDs before writing current rows. Sorting
+uses the scalar ID values (including numeric IDs), within each chain scope. It
+does not reorder the change history, alter IDs or checkpoints, or require a new
+schema. Text ordering uses JavaScript comparison; locality benefits depend on
+how closely that matches the database collation. Hash-style ASCII IDs are the
+intended workload. The writer sorts the existing ID array, avoiding a database
+sort over the full rows and its potential temporary-file spill.
+
+Run the repeatable local experiment against a dedicated PostgreSQL database:
+
+```sh
+cd packages/envio
+PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGDATABASE=postgres node benchmarks/ordered-writes.mjs
+```
+
+It creates and removes an isolated schema, compares arrival order, SQL sorting,
+and client sorting, and checks exact row-count/block-sum parity. `SEED_ROWS`
+(default 500000) and `BATCH_SIZE` (default 16000) control the workload. JSON output
+includes client elapsed time, server execution time, shared-buffer reads, and
+sort spill. Use a test server with an index larger than `shared_buffers` to
+exercise cache pressure; do not change production settings for the experiment.
+
+A four-round local run with 32 MiB shared buffers reduced shared-buffer reads
+by approximately 23% with client sorting and produced no sort spill. Elapsed
+time varied across rounds: this is evidence of less buffer I/O, not a proven
+production throughput improvement. Compare sustained write stalls and event
+throughput after any deployment. OS cache, checkpoint activity, and event mix
+can dominate timing. Existing workflow ownership remains the runtime's Build &
+Verify and versioned publishing process described above.
