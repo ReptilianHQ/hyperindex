@@ -1168,6 +1168,9 @@ let rec writeBatch = async (
         }
       })
 
+      // Visit nearby primary-key pages together without sorting wide rows in SQL.
+      // Each group has one chain scope; history changes retain their event order.
+      orderedIds->Array.sort((a, b) => a < b ? -1. : a > b ? 1. : 0.)->ignore
       let backfillHistoryIds = Utils.Set.make()
       orderedIds->Array.forEach(entityId => {
         let entityKey = entityId->EntityId.toKey
