@@ -63,6 +63,9 @@ scenario->Scenario.it(
                 value: i,
               })
             })
+            [9007199254740993n, -9007199254740993n, -2n]->Array.forEach(id =>
+              context.numericEntry.set({id, value: 0})
+            )
             context.entry.set({id: "2", value: 22})
             context.entry.set({id: "removed", value: 0})
             context.entry.deleteUnsafe("removed")
@@ -113,7 +116,14 @@ scenario->Scenario.it(
         {"id": "10", "value": 10, "chain_id": 1337},
         {"id": "2", "value": 22, "chain_id": 1337},
       ],
-      [{"id": "1"}, {"id": "2"}, {"id": "10"}],
+      [
+        {"id": "-9007199254740993"},
+        {"id": "-2"},
+        {"id": "1"},
+        {"id": "2"},
+        {"id": "10"},
+        {"id": "9007199254740993"},
+      ],
       [{"id": "10", "value": 100}, {"id": "2", "value": 22}, {"id": "3", "value": 3}],
     ))
   },

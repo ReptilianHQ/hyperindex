@@ -22,8 +22,10 @@ const data = Array.from({length: batchCount}, (_, batch) => {
   return [rows.map(i => `4663:0x${createHash('sha256').update(String(i)).digest('hex')}:1`), rows, rows.map(() => 'b'.repeat(100))];
 });
 const results = [];
+let createdSchema = false;
 try {
   await sql.unsafe(`CREATE SCHEMA "${schema}"`);
+  createdSchema = true;
   await sql.unsafe(`CREATE TABLE "${schema}".seed(id text PRIMARY KEY, block bigint NOT NULL, payload text NOT NULL)`);
   await sql.unsafe(`INSERT INTO "${schema}".seed SELECT '4663:0x'||md5(i::text)||md5(('x'||i)::text)||':1',i,repeat('a',100) FROM generate_series(1,$1::int)i`, [seedRows]);
   for (let round = 0; round < rounds; round++) {
@@ -58,6 +60,9 @@ ${mode === 'sql' ? 'ORDER BY id' : ''} ON CONFLICT(id) DO UPDATE SET block=exclu
   }
   console.log(JSON.stringify({seedRows, batchSize, settings: await sql.unsafe("SELECT name,setting FROM pg_settings WHERE name IN ('shared_buffers','lc_collate','work_mem')"), results}));
 } finally {
-  await sql.unsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-  await sql.end();
+  try {
+    if (createdSchema) await sql.unsafe(`DROP SCHEMA "${schema}" CASCADE`);
+  } finally {
+    await sql.end();
+  }
 }
