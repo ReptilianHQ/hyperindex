@@ -46,12 +46,14 @@ let loadById = (
     // we can be sure that we load only the new ones.
     let dbEntities = try {
       (
-        await storage.loadOrThrow(
-          ~table=entityConfig.table,
-          ~filter=EntityFilter.In({
-            fieldName: Table.idFieldName,
-            fieldValue: idsToLoad->(Utils.magic: array<string> => array<unknown>),
-          })->scopeFilter(~table=entityConfig.table, ~scope),
+        await RuntimeHooks.traceEntityLoad(key, "read", () =>
+          storage.loadOrThrow(
+            ~table=entityConfig.table,
+            ~filter=EntityFilter.In({
+              fieldName: Table.idFieldName,
+              fieldValue: idsToLoad->(Utils.magic: array<string> => array<unknown>),
+            })->scopeFilter(~table=entityConfig.table, ~scope),
+          )
         )
       )->(Utils.magic: array<unknown> => array<Internal.entity>)
     } catch {
@@ -62,19 +64,21 @@ let loadById = (
       )
     }
 
-    let entitiesMap = Dict.make()
+    RuntimeHooks.traceEntityLoad(key, "initialize", () => {
+      let entitiesMap = Dict.make()
 
-    //Set the entity in the in memory store
-    for idx in 0 to dbEntities->Array.length - 1 {
-      let entity = dbEntities->Array.getUnsafe(idx)
-      entitiesMap->Dict.set(entity.id, entity)
-    }
-    idsToLoad->Array.forEach(entityId => {
-      inMemTable->InMemoryTable.Entity.initValue(
-        ~committedCheckpointId=indexerState->IndexerState.committedCheckpointId,
-        ~key=entityId,
-        ~entity=entitiesMap->Utils.Dict.dangerouslyGetNonOption(entityId),
-      )
+      //Set the entity in the in memory store
+      for idx in 0 to dbEntities->Array.length - 1 {
+        let entity = dbEntities->Array.getUnsafe(idx)
+        entitiesMap->Dict.set(entity.id, entity)
+      }
+      idsToLoad->Array.forEach(entityId => {
+        inMemTable->InMemoryTable.Entity.initValue(
+          ~committedCheckpointId=indexerState->IndexerState.committedCheckpointId,
+          ~key=entityId,
+          ~entity=entitiesMap->Utils.Dict.dangerouslyGetNonOption(entityId),
+        )
+      })
     })
 
     indexerState->IndexerState.endStorageLoad(
@@ -272,12 +276,14 @@ let loadEffect = (
 
       let dbEntities = try {
         (
-          await storage.loadOrThrow(
-            ~table,
-            ~filter=EntityFilter.In({
-              fieldName: Table.idFieldName,
-              fieldValue: idsToLoad->(Utils.magic: array<string> => array<unknown>),
-            }),
+          await RuntimeHooks.traceEntityLoad(key, "read", () =>
+            storage.loadOrThrow(
+              ~table,
+              ~filter=EntityFilter.In({
+                fieldName: Table.idFieldName,
+                fieldValue: idsToLoad->(Utils.magic: array<string> => array<unknown>),
+              }),
+            )
           )
         )->(Utils.magic: array<unknown> => array<Internal.effectCacheItem>)
       } catch {
@@ -290,21 +296,23 @@ let loadEffect = (
         []
       }
 
-      dbEntities->Array.forEach(dbEntity => {
-        try {
-          let output = dbEntity.output->S.parseOrThrow(outputSchema)
-          idsFromCache->Utils.Set.add(dbEntity.id)->ignore
-          inMemTable->InMemoryStore.initEffectOutputFromDb(~cacheKey=dbEntity.id, ~output)
-        } catch {
-        | S.Raised(error) =>
-          inMemTable->EffectState.recordInvalidation
-          Ecosystem.getItemLogger(item, ~ecosystem)->Logging.childTrace({
-            "msg": "Invalidated effect cache",
-            "input": dbEntity.id,
-            "effect": effectName,
-            "err": error->S.Error.message,
-          })
-        }
+      RuntimeHooks.traceEntityLoad(key, "initialize", () => {
+        dbEntities->Array.forEach(dbEntity => {
+          try {
+            let output = dbEntity.output->S.parseOrThrow(outputSchema)
+            idsFromCache->Utils.Set.add(dbEntity.id)->ignore
+            inMemTable->InMemoryStore.initEffectOutputFromDb(~cacheKey=dbEntity.id, ~output)
+          } catch {
+          | S.Raised(error) =>
+            inMemTable->EffectState.recordInvalidation
+            Ecosystem.getItemLogger(item, ~ecosystem)->Logging.childTrace({
+              "msg": "Invalidated effect cache",
+              "input": dbEntity.id,
+              "effect": effectName,
+              "err": error->S.Error.message,
+            })
+          }
+        })
       })
 
       indexerState->IndexerState.endStorageLoad(
@@ -360,6 +368,7 @@ let loadByFilter = (
   ~ecosystem,
   ~filter: EntityFilter.t,
 ) => {
+  let metricKey = `${entityConfig.name}.getWhere${scope->scopeKeySuffix}`
   let key =
     filter->EntityFilter.toOperationKey(~entityName=entityConfig.name) ++ scope->scopeKeySuffix
   let inMemTable = indexerState->InMemoryStore.getInMemTable(~entityConfig, ~scope)
@@ -379,7 +388,9 @@ let loadByFilter = (
     // Inside the load timing: waiting on the build is time the handler spends
     // waiting for this operation, and it's the only thing that explains an
     // occasional very slow getWhere.
-    await storage.ensureQueryIndexes(~table=entityConfig.table, ~filters)
+    await RuntimeHooks.traceEntityLoad(metricKey, "index_prepare", () =>
+      storage.ensureQueryIndexes(~table=entityConfig.table, ~filters)
+    )
 
     // Loading a superset of rows via a merged query is safe: every loaded
     // entity is matched against all registered indexes, not only the
@@ -391,17 +402,23 @@ let loadByFilter = (
       try {
         let entities =
           (
-            await storage.loadOrThrow(
-              ~table=entityConfig.table,
-              ~filter=filter->scopeFilter(~table=entityConfig.table, ~scope),
+            await RuntimeHooks.traceEntityLoad(metricKey, "read", () =>
+              storage.loadOrThrow(
+                ~table=entityConfig.table,
+                ~filter=filter->scopeFilter(~table=entityConfig.table, ~scope),
+              )
             )
           )->(Utils.magic: array<unknown> => array<Internal.entity>)
 
-        entities->Array.forEach(entity => {
-          inMemTable->InMemoryTable.Entity.initValue(
-            ~committedCheckpointId=indexerState->IndexerState.committedCheckpointId,
-            ~key=entity.id,
-            ~entity=Some(entity),
+        RuntimeHooks.traceEntityLoad(metricKey, "initialize", () => {
+          entities->Array.forEach(
+            entity => {
+              inMemTable->InMemoryTable.Entity.initValue(
+                ~committedCheckpointId=indexerState->IndexerState.committedCheckpointId,
+                ~key=entity.id,
+                ~entity=Some(entity),
+              )
+            },
           )
         })
 
