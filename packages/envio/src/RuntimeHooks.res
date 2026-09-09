@@ -114,3 +114,13 @@ let tracePoolAcquisition = callback => {
   )
   hook(callback)
 }
+
+let traceEntityLoadFallback = (_, _, callback) => callback()
+
+let traceEntityLoad = (operation, step, callback) => {
+  let hook: (string, string, unit => 'a) => 'a = get(
+    "dlmm.chain-indexer.trace-entity-load",
+    traceEntityLoadFallback,
+  )
+  hook(operation, step, callback)
+}

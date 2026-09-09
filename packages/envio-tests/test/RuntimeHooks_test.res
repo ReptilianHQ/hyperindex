@@ -104,3 +104,26 @@ describe("RuntimeHooks", () => {
     t.expect((ran.contents, value)).toEqual((true, 42))
   })
 })
+
+describe("Entity-load hooks", () => {
+  Async.it("preserves synchronous and asynchronous callbacks without a host", async t => {
+    let calls = ref(0)
+    let sync = RuntimeHooks.traceEntityLoad(
+      "Account.get",
+      "initialize",
+      () => {
+        calls := calls.contents + 1
+        42
+      },
+    )
+    let asyncValue = await RuntimeHooks.traceEntityLoad(
+      "Account.get",
+      "read",
+      async () => {
+        calls := calls.contents + 1
+        43
+      },
+    )
+    t.expect((sync, asyncValue, calls.contents)).toEqual((42, 43, 2))
+  })
+})

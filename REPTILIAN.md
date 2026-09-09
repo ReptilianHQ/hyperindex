@@ -97,3 +97,24 @@ production throughput improvement. Compare sustained write stalls and event
 throughput after any deployment. OS cache, checkpoint activity, and event mix
 can dominate timing. Existing workflow ownership remains the runtime's Build &
 Verify and versioned publishing process described above.
+
+## Entity-load timing hook
+
+`LoadLayer` exposes `dlmm.chain-indexer.trace-entity-load` as a host wrapper with
+arguments `(operation, step, callback)`. The host must invoke the callback exactly
+once and preserve synchronous returns, asynchronous results, and errors. Without
+an installed host, the runtime directly invokes the callback.
+
+The `read` step covers the storage-client await (including pool wait and driver
+decoding); `initialize` covers entity-map construction/in-memory initialization or
+effect-cache validation; `index_prepare` covers filtered-read index preparation.
+Operations contain only entity/effect names, access kind, and optional chain scope.
+The chain-indexer host uses async-local processing-phase context to distinguish
+preload reads from handler reads without relying on sampled tracing. These are
+batched-load observations; they add no storage queries or RPCs. Overlapping read
+durations must not be summed as exclusive batch wall time.
+
+Verification: compile `packages/envio-tests` and run `EntityLoadTiming_test`,
+`RuntimeHooks_test`, and `LoadLayer_test`. The public-handler regression checks
+read/initialization boundaries, filtered-read index preparation, and unchanged
+stored output; host telemetry tests cover concurrent phase attribution and errors.
