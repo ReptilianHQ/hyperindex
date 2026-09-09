@@ -1,5 +1,20 @@
 open Vitest
 
+@module("vitest") external onTestFinished: (unit => unit) => unit = "onTestFinished"
+
+let observeEffectLoads: array<(string, string)> => (unit => unit) = %raw(`seen => {
+  const key = Symbol.for("dlmm.chain-indexer.trace-entity-load");
+  const previous = globalThis[key];
+  globalThis[key] = (operation, step, callback) => {
+    if (operation === "testEffectWithCache.effect") seen.push([operation, step]);
+    return callback();
+  };
+  return () => {
+    if (previous === undefined) delete globalThis[key];
+    else globalThis[key] = previous;
+  };
+}`)
+
 let contractsYaml = `
 contracts:
   - name: Gravatar
@@ -319,6 +334,8 @@ describe("E2E tests", () => {
     ~indexer,
     ~source,
   ) => {
+    let loadSteps = []
+    onTestFinished(observeEffectLoads(loadSteps))
     let sourceMock = source(1337)
     await Utils.delay(0)
 
@@ -528,6 +545,11 @@ describe("E2E tests", () => {
         },
       ],
     ))
+
+    t.expect(loadSteps).toEqual([
+      ("testEffectWithCache.effect", "read"),
+      ("testEffectWithCache.effect", "initialize"),
+    ])
 
     // Sorted: rows come back in whatever order the storage holds them, which
     // differs once one of the two has been rewritten.
