@@ -68,7 +68,13 @@ for (const resumed of [false, true]) {
      events: await Promise.all(expected.map(row=>indexer.Seen.get(row.id))),
      clientFiltering: filteringWasUsed(),
    }).toEqual({events:expected,clientFiltering:true});
- }, {testCases:20, seed:150909, reportMultipleFailures:false}), 120000);
+ }, {
+   testCases:20,
+   seed:150909,
+   reportMultipleFailures:false,
+   // Each generated input executes a full HTTP replay; retain the Vitest deadline.
+   suppressHealthCheck:[hegel.HealthCheck.TooSlow],
+ }), 120000);
 }
 `,
 )
