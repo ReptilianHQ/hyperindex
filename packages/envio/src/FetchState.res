@@ -414,6 +414,9 @@ module OptimizedPartitions = {
               {
                 ...right,
                 selection: mergeSelection(left.selection, right.selection),
+                dynamicContract: addresses->AddressSet.contractNames->Array.length === 1
+                  ? right.dynamicContract
+                  : None,
                 addresses,
                 sourceRangeCapacity: minRange,
                 prevSourceRangeCapacity: minRange,
