@@ -113,7 +113,11 @@ impl MockHyperSyncServer {
     }
 
     /// Queue the page the next query is answered with. See `build_page` for the
-    /// spec shape.
+    /// spec shape. `filterByQuery: true` instead replaces the queue with a
+    /// persistent world that stays at its front. This mode requires bounded
+    /// queries (`to_block` or a spec `nextBlock`); absent both, it does not advance.
+    /// It filters logs by range, address and topics, but blocks and transactions
+    /// only by range. It is a fixture for bounded log replays, not a full query engine.
     #[napi]
     pub fn push_response(&self, spec: String) -> napi::Result<()> {
         let value: Value = serde_json::from_str(&spec)
