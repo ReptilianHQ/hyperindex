@@ -132,7 +132,8 @@ timing, and resume boundaries. Both continuous and resumed runs must retain ever
 factory, token, and curve event and must actually cross into client filtering.
 Each generated input executes a full HTTP replay, so these two properties suppress
 Hegel's 30-second slow-generation health check while retaining their 120-second
-Vitest deadlines and 20 cases each.
+Vitest deadlines and 20 cases each. The backend CI job allows 12 minutes for
+the full suite plus these replays and teardown.
 The original implementation fails generated replay completion; the fixed one
 passes. Runtime changes prevent further loss but do not reconstruct data already
 skipped: recover from before the gap and validate event/launch parity.
