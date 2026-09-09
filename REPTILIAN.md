@@ -118,3 +118,24 @@ Verification: compile `packages/envio-tests` and run `EntityLoadTiming_test`,
 `RuntimeHooks_test`, and `LoadLayer_test`. The public-handler regression checks
 read/initialization boundaries, filtered-read index preparation, and unchanged
 stored output; host telemetry tests cover concurrent phase attribution and errors.
+
+## Mixed-partition filtering safety
+
+A partition's `dynamicContract` tag means it holds addresses from only that
+contract type. Coalescing addresses from multiple types clears the tag. Otherwise,
+client-filter catch-up cleanup can retire a mixed partition and silently discard
+unrelated factory coverage while other streams continue advancing.
+
+`MixedPartitionCoverage_hegel_test` exercises real user configuration and handlers
+against a local HyperSync world. Hegel varies launch counts, pagination, response
+timing, and resume boundaries. Both continuous and resumed runs must retain every
+factory, token, and curve event and must actually cross into client filtering.
+The original implementation fails generated replay completion; the fixed one
+passes. Runtime changes prevent further loss but do not reconstruct data already
+skipped: recover from before the gap and validate event/launch parity.
+
+Compile `packages/envio-tests` and run `MixedPartitionCoverage_hegel_test`,
+`FetchState_test`, `DynamicSplitQueueAlias_test`, `ClientFilterDedup_test`, and
+`DynamicContractPersistence_test`. Release ownership remains Build & Verify and
+the versioned publish workflow described above; this library has no Render service
+or Blueprint to deploy directly.

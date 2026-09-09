@@ -1408,7 +1408,7 @@ describe("FetchState.registerDynamicContracts", () => {
       ).toEqual(([
         (
           "0",
-          Some("Gravatar"),
+          None,
           [mockAddress0, mockAddress1, mockAddress5],
           None,
           9,

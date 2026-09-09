@@ -119,7 +119,11 @@ impl MockHyperSyncServer {
         let value: Value = serde_json::from_str(&spec)
             .context("parse mock hypersync response spec")
             .map_err(err)?;
-        self.state.lock().unwrap().responses.push_back(value);
+        let mut state = self.state.lock().unwrap();
+        if value.get("filterByQuery").and_then(Value::as_bool) == Some(true) {
+            state.responses.clear();
+        }
+        state.responses.push_back(value);
         Ok(())
     }
 
@@ -242,11 +246,34 @@ async fn handle_connection(
                 let (spec, height) = {
                     let mut state = state.lock().unwrap();
                     state.queries.push(request.body.clone());
-                    (state.responses.pop_front(), state.height)
+                    (
+                        if state.responses.front().is_some_and(|spec| {
+                            spec.get("filterByQuery").and_then(Value::as_bool) == Some(true)
+                        }) {
+                            state.responses.front().cloned()
+                        } else {
+                            state.responses.pop_front()
+                        },
+                        state.height,
+                    )
                 };
                 // A Cap'n Proto query body lands here too, and reads as a
                 // malformed JSON one — the source has to be built with the
                 // `Json` serialization format.
+                if let Some(seed) = spec
+                    .as_ref()
+                    .and_then(|s| s.get("delaySeed"))
+                    .and_then(Value::as_u64)
+                {
+                    if seed > 0 {
+                        let delay = request
+                            .body
+                            .bytes()
+                            .fold(seed, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+                            % 11;
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    }
+                }
                 match spec.as_ref().and_then(raw_reply) {
                     // A spec carrying a status answers at the HTTP level
                     // instead of with a page: rate limiting and
@@ -425,6 +452,76 @@ fn build_page(spec: Option<&Value>, query: &Value, height: u64) -> Result<Vec<u8
             .get("to_block")
             .and_then(Value::as_u64)
             .unwrap_or(from_block),
+    };
+    let filtered;
+    let (spec, next_block) = if spec.get("filterByQuery").and_then(Value::as_bool) == Some(true) {
+        let end =
+            next_block.min(from_block + spec.get("pageSpan").and_then(Value::as_u64).unwrap_or(10));
+        let mut page = spec.clone();
+        for table in ["blocks", "logs", "transactions"] {
+            if let Some(rows) = spec.get(table).and_then(Value::as_array) {
+                let mut rows: Vec<Value> = rows
+                    .iter()
+                    .filter(|row| {
+                        let block = row
+                            .get(if table == "blocks" {
+                                "number"
+                            } else {
+                                "block_number"
+                            })
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        if block < from_block || block >= end {
+                            return false;
+                        }
+                        if table != "logs" {
+                            return true;
+                        }
+                        query
+                            .get("logs")
+                            .and_then(Value::as_array)
+                            .is_some_and(|sels| {
+                                sels.iter().any(|sel| {
+                                    let address_ok =
+                                        sel.get("address").and_then(Value::as_array).is_none_or(
+                                            |xs| xs.is_empty() || xs.contains(&row["address"]),
+                                        );
+                                    let topics_ok = sel
+                                        .get("topics")
+                                        .and_then(Value::as_array)
+                                        .is_none_or(|topics| {
+                                            topics.iter().enumerate().all(|(i, values)| {
+                                                values.as_array().is_none_or(|xs| {
+                                                    xs.is_empty()
+                                                        || xs.contains(&row[format!("topic{i}")])
+                                                })
+                                            })
+                                        });
+                                    address_ok && topics_ok
+                                })
+                            })
+                    })
+                    .cloned()
+                    .collect();
+                rows.sort_by_key(|row| {
+                    (
+                        row.get(if table == "blocks" {
+                            "number"
+                        } else {
+                            "block_number"
+                        })
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                        row.get("log_index").and_then(Value::as_u64).unwrap_or(0),
+                    )
+                });
+                page[table] = Value::Array(rows);
+            }
+        }
+        filtered = page;
+        (&filtered, end)
+    } else {
+        (spec, next_block)
     };
     let archive_height = spec
         .get("archiveHeight")
