@@ -1060,7 +1060,8 @@ let fromPublic = (publicConfigJson: JSON.t) => {
     ecosystem,
     maxAddrInPartition,
     clientFilterAddressThreshold: Env.clientFilterAddressThreshold,
-    batchSize: publicConfig["fullBatchSize"]->Option.getOr(5000),
+    batchSize:
+      Env.processingBatchSize->Option.getOr(publicConfig["fullBatchSize"]->Option.getOr(5000)),
     reorgThresholdReadyTolerance: 100,
     lowercaseAddresses,
     isDev: publicConfig["isDev"]->Option.getOr(false),

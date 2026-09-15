@@ -24,6 +24,9 @@ the application-specific runtime behavior that upstream does not provide:
   budget pass;
 - optional fixed-block historical source request pacing with finite-boundary
   handling (`ENVIO_SOURCE_BLOCKS_PER_REQUEST`, historical only);
+- an optional runtime processing batch override
+  (`ENVIO_PROCESSING_BATCH_SIZE`) that leaves `full_batch_size` and its stored
+  config identity unchanged, allowing checkpoint-safe throughput experiments;
 - optional `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` coalescing after realtime is
   reached, without delaying historical backfill or RPC realtime fetching;
 - EVM `onBlock` callbacks can opt into `includeTimestamp: true` to expose
