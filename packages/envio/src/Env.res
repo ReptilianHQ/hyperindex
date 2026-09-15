@@ -13,6 +13,9 @@ let maxPartitionConcurrency =
 let sourceBlocksPerRequest =
   envSafe->EnvSafe.get("ENVIO_SOURCE_BLOCKS_PER_REQUEST", S.option(S.int->S.intMin(1)))
 
+let processingBatchSize =
+  envSafe->EnvSafe.get("ENVIO_PROCESSING_BATCH_SIZE", S.option(S.int->S.intMin(1)))
+
 // Minimum newly fetchable blocks to accumulate before another HyperSync query
 // after realtime is reached. One preserves Envio's native per-block behavior.
 let hyperSyncHeadPollBlocks =
