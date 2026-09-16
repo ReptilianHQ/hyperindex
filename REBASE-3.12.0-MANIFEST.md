@@ -174,7 +174,7 @@ not show a material benefit.
 
 | Item | Where | Status |
 | --- | --- | --- |
-| Cross-contract address-bound partition coalescing | `FetchState.OptimizedPartitions.coalesceAddressBoundPartitions` | NEEDS-BENCHMARK. Most invasive fork behavior; its former metadata bug caused silent launch-history loss. Upstream 3.11+ already does large-scale client-side address filtering. Low rebase cost (see churn table) but that is not a reason to keep it. If removed, `a00245a3a` and the mixed-partition test apparatus go with it. **Not hypothetical for this workload:** `chain-indexer/config.yaml` declares 7 contract types (Launchpad, GraduationPool, FeeController, LBFactory, LBPair, LaunchToken, Router) with no static addresses, all registered dynamically via `indexer.contractRegister` (`src/handlers/registrations.ts`). Many address-bound partitions across distinct contract types is exactly the shape coalescing acts on, so benchmark it rather than dropping it blind. |
+| Cross-contract address-bound partition coalescing | `FetchState.OptimizedPartitions.coalesceAddressBoundPartitions` | NEEDS-BENCHMARK. Most invasive fork behavior; its former metadata bug caused silent launch-history loss. **Correction: the "upstream already does this" argument does not hold — see below.** Low rebase cost (see churn table) but that is not a reason to keep it. If removed, `a00245a3a` and the mixed-partition test apparatus go with it. **Not hypothetical for this workload:** `chain-indexer/config.yaml` declares 7 contract types (Launchpad, GraduationPool, FeeController, LBFactory, LBPair, LaunchToken, Router) with no static addresses, all registered dynamically via `indexer.contractRegister` (`src/handlers/registrations.ts`). Many address-bound partitions across distinct contract types is exactly the shape coalescing acts on, so benchmark it rather than dropping it blind. |
 | Sorted entity writes | `41c2159c6` (#20), `PgStorage.res` | **BENCHMARKED — recommend remove.** See the section below. |
 | `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` | `0d1af4a0a` | NEEDS-BENCHMARK. Re-evaluate the traffic-vs-latency trade now that upstream 3.10 ships height-stream recovery. Currently permits bounded realtime lag by design. |
 | Telemetry duplicating upstream metrics | `RuntimeHooks` surface | Scope narrowed by the consumer audit. 37 hook-fed series are graphed on the shipped board, so the surface is broadly live; the prune should be driven by that board's metric list rather than by reading the hook definitions. 3.12.0's `envio_progress_block_time_seconds` does **not** subsume the heartbeat (see Retain), and it is not novel for chain-indexer's external observer either — `scripts/indexer-observer.mjs:284,290` already derives `head` from an independent `getRpcHead` call, so its `blockLag` never depended on the source's claimed height. |
@@ -187,6 +187,38 @@ not show a material benefit.
 | `d8c106dcc` — HyperSync chain 988 | **VERIFIED redundant.** Upstream `v3.12.0` carries `StablesKinshipGrass = 988` at `chain_helpers.rs:395`. The fork's own code anticipated this with a "Fork divergence: chain 988 is not in upstream's enum. If upstream ever…" comment at line 677. chain-indexer deploys only Robinhood 4663/46630 regardless. |
 | Prior-generation rebase tails | Superseded; see note 1 above |
 | Fork-only fixtures/scaffolding for removed patches | Follows whatever the prove-or-remove pass drops |
+
+## Correction: upstream never implemented coalescing, and its client filtering is not new
+
+#283 motivates reconsidering coalescing partly on the grounds that "upstream 3.11
+already includes large-scale client-side address filtering." That premise does
+not survive checking.
+
+**VERIFIED:**
+
+- `coalesceAddressBoundPartitions` exists in **no** upstream release — absent from
+  `v3.9.0`, `v3.11.0`, and `v3.12.0`. Upstream has never implemented this
+  behavior in any form. (The `OptimizedPartitions` *module* is upstream's and
+  predates the fork — `FetchState.res:222` in `v3.12.0` vs `:233` on `main` — so
+  the shared name is not shared functionality.)
+- Client-side address filtering is **not a new upstream capability**.
+  `clientFilter` references in `FetchState.res` are identical across releases —
+  48 in `v3.9.0`, 48 in `v3.11.0`, 48 in `v3.12.0` — and the
+  `clientFilterAddressThreshold` env knob is present in all three. It was already
+  in `v3.9.0`, which is the base this fork was built on.
+- Upstream's entire `FetchState.res` change from `3.9.0` to `3.12.0` is the
+  `isSameLog` helper (deduping one log routed to two registrations), 14 added
+  lines. Nothing touching partitions or address filtering.
+
+Consequence: the fork's coalescing was written **on top of** upstream client
+filtering, not as a substitute for a capability upstream lacked at the time.
+Moving to 3.12.0 therefore supplies no new upstream mechanism that would displace
+it. The keep/remove call rests entirely on the benchmark — "upstream caught up"
+is not available as a reason.
+
+This also means the fork's own threshold comment is consistent: it says the
+threshold is "Derived from upstream's constant," which only makes sense if
+upstream already owned the client-filter switch.
 
 ## Evidence: sorted entity writes (`41c2159c6`, #20)
 
