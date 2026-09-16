@@ -24,9 +24,32 @@ Evidence markers used below:
 `UNLISTED_BUT_SERVED` (commit `6f7763df9`, PR #1645). `v3.11.0` contains no Arc
 entry at all.
 
-Arc mainnet is the chain the Argus launcher deploys to, so indexed Argus
-positions require a runtime at `>= 3.12.0`. This makes the rebase a hard
-dependency for that work rather than routine fork hygiene.
+Arc mainnet is the chain the Argus launcher deploys to, which is why 3.12.0 is
+the right base to land on.
+
+**But 3.12.0 is not a prerequisite for indexing Arc, and this document
+previously claimed it was.** Measured on stock runtimes:
+
+| runtime | chain 5042 config | `envio codegen` |
+| --- | --- | --- |
+| 3.12.0 | no endpoint given | **exit 0** — auto-resolved |
+| 3.12.0 | bogus chain id (control) | exit 1 — demands explicit endpoint |
+| 3.11.0 | no endpoint given | exit 1 — error text offers the manual override |
+| 3.9.0 | `hypersync_config.url: https://5042.hypersync.xyz` | **exit 0** |
+
+HyperSync serves Arc today (mainnet height ~21.2M, testnet ~62.5M, both
+HTTP 200). So what 3.12.0 contributes is **auto-discovery, not capability**:
+chain 5042 can be indexed on the fork's current 3.9.0 base with a three-line
+explicit endpoint. The bogus-chain control matters — it shows the 3.12.0 pass is
+a real resolution rather than a config parser that ignores unknown ids.
+
+Consequence: Argus position indexing is **not** blocked on this rebase. The
+rebase stands on its own merits; it should not be cited as a gate for that work.
+
+(Verified against stock `envio@3.9.0`. The fork is a patch series on that base
+and removes no config keys, so this should carry to
+`@reptilianhq/envio@3.9.0-reptilian.7` — worth one confirmation run against the
+scoped package before anyone relies on it.)
 
 Note that the published 3.12.0 release notes do not mention Arc in their
 headline sections (they cover per-chain processes, the progress-block-time
