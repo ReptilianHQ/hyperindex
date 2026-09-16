@@ -167,10 +167,28 @@ rows are now VERIFIED rather than carried on the ticket's word.
 Resume compatibility (`Config.diffPaths` ignoring the `-reptilian.N` suffix) is
 retained as behavior, reimplemented on the new base rather than cherry-picked.
 
-### Prove or remove
+### Prove or remove — DECIDED
 
-Blocked on #283's evidence bundle. Default to **remove** if the benchmark does
-not show a material benefit.
+All four items were settled by the repo owner on 2026-09-16. Decisions and their
+rationale are below; the table that follows is retained for the evidence behind
+each.
+
+| Item | Decision | Basis |
+| --- | --- | --- |
+| Sorted entity writes (`41c2159c6`) | **Drop** | Benchmarked. Buffer-read win reproduces, throughput does not; most expensive merge in the series. Recoverable from `main`. |
+| Cross-contract coalescing | **Keep, without a benchmark** | Upstream implements no equivalent, so dropping loses the behavior outright; low merge cost; the workload genuinely produces the partitions it targets. Accepted tradeoff: our most invasive patch rides along unproven. |
+| `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` (`0d1af4a0a`) | **Keep, re-tune later** | Live consumers today; self-contained opt-in knob. Revisit the traffic-vs-lag setting once running on 3.12 alongside upstream's height-stream recovery. |
+| Telemetry duplicating upstream | **Prune the duplicates** | Drop generic fetch/storage stall instruments upstream now covers; keep scheduler-specific visibility. **Must be driven panel-by-panel from the shipped dashboard's metric list** — 37 live series depend on these hooks, and a blind trim blanks panels or breaks alerts. |
+| Simulated `blockLag: 0` | **Drop** | Unless something is found to need it during the port. |
+| `ENVIO_SOURCE_QUERY_MAX_RETRIES`, `ENVIO_SOURCE_QUERY_RETRY_TIMEOUT_MILLIS` | **Drop the knobs** | Dead config surface — one has zero references anywhere, the other appears only in a runbook line and a comment. **The bounded-retry behavior is retained**; only the tuning dials go, so confirm the defaults exist on the new base. |
+
+**Dependency created by keeping coalescing:** `a00245a3a` (#22, mixed-partition
+coverage during client filtering) and `MixedPartitionCoverage_hegel_test` must
+come with it. That patch is what prevents the silent launch-history loss the
+original coalescing bug caused. Keeping coalescing without it reintroduces a
+known data-loss defect.
+
+The evidence behind each item:
 
 | Item | Where | Status |
 | --- | --- | --- |
