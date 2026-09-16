@@ -151,8 +151,8 @@ not show a material benefit.
 
 | Item | Where | Status |
 | --- | --- | --- |
-| Cross-contract address-bound partition coalescing | `FetchState.OptimizedPartitions.coalesceAddressBoundPartitions` | NEEDS-BENCHMARK. Most invasive fork behavior; its former metadata bug caused silent launch-history loss. Upstream 3.11+ already does large-scale client-side address filtering. Low rebase cost (see churn table) but that is not a reason to keep it. If removed, `a00245a3a` and the mixed-partition test apparatus go with it. |
-| Sorted entity writes | `41c2159c6` (#20), `PgStorage.res` | NEEDS-BENCHMARK. Prior local run showed ~23% fewer shared-buffer reads at 32 MiB shared_buffers, with no proven sustained throughput gain. **Highest conflict cost in the series.** Harness already exists: `packages/envio/benchmarks/ordered-writes.mjs` (VERIFIED present). Decide this one first. |
+| Cross-contract address-bound partition coalescing | `FetchState.OptimizedPartitions.coalesceAddressBoundPartitions` | NEEDS-BENCHMARK. Most invasive fork behavior; its former metadata bug caused silent launch-history loss. Upstream 3.11+ already does large-scale client-side address filtering. Low rebase cost (see churn table) but that is not a reason to keep it. If removed, `a00245a3a` and the mixed-partition test apparatus go with it. **Not hypothetical for this workload:** `chain-indexer/config.yaml` declares 7 contract types (Launchpad, GraduationPool, FeeController, LBFactory, LBPair, LaunchToken, Router) with no static addresses, all registered dynamically via `indexer.contractRegister` (`src/handlers/registrations.ts`). Many address-bound partitions across distinct contract types is exactly the shape coalescing acts on, so benchmark it rather than dropping it blind. |
+| Sorted entity writes | `41c2159c6` (#20), `PgStorage.res` | **BENCHMARKED — recommend remove.** See the section below. |
 | `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` | `0d1af4a0a` | NEEDS-BENCHMARK. Re-evaluate the traffic-vs-latency trade now that upstream 3.10 ships height-stream recovery. Currently permits bounded realtime lag by design. |
 | Telemetry duplicating upstream metrics | `RuntimeHooks` surface | Scope narrowed by the consumer audit. 37 hook-fed series are graphed on the shipped board, so the surface is broadly live; the prune should be driven by that board's metric list rather than by reading the hook definitions. 3.12.0's `envio_progress_block_time_seconds` does **not** subsume the heartbeat (see Retain), and it is not novel for chain-indexer's external observer either — `scripts/indexer-observer.mjs:284,290` already derives `head` from an independent `getRpcHead` call, so its `blockLag` never depended on the source's claimed height. |
 | Simulated `blockLag: 0` | `SimulateItems.patchConfig` | TICKET. Keep only if a focused test shows behavior not expressible in test config. |
@@ -164,6 +164,60 @@ not show a material benefit.
 | `d8c106dcc` — HyperSync chain 988 | **VERIFIED redundant.** Upstream `v3.12.0` carries `StablesKinshipGrass = 988` at `chain_helpers.rs:395`. The fork's own code anticipated this with a "Fork divergence: chain 988 is not in upstream's enum. If upstream ever…" comment at line 677. chain-indexer deploys only Robinhood 4663/46630 regardless. |
 | Prior-generation rebase tails | Superseded; see note 1 above |
 | Fork-only fixtures/scaffolding for removed patches | Follows whatever the prove-or-remove pass drops |
+
+## Evidence: sorted entity writes (`41c2159c6`, #20)
+
+Ran `packages/envio/benchmarks/ordered-writes.mjs` — 4 rounds × 3 modes, 12
+runs, mode order alternating per round. Every run passed the benchmark's own
+row-count and block-sum parity check.
+
+Environment: local throwaway PostgreSQL cluster, `shared_buffers = 32MB`,
+`work_mem = 4MB`, `lc_collate = en_US.UTF-8`, `SEED_ROWS = 500000`,
+`BATCH_SIZE = 16000`. Collation matters for this patch (client sorting uses
+JavaScript comparison), and `en_US.UTF-8` is the likely production default —
+chain-indexer pins no collation in its schema, so it inherits the server's.
+
+Means across 4 runs per mode:
+
+| mode | shared read blocks | temp written blocks | execution ms | elapsed ms |
+| --- | --- | --- | --- | --- |
+| `arrival` (no sorting) | 36,888 | 0 | 1,161.7 | 1,226.0 |
+| `sql` (`ORDER BY id`) | 28,624 | 1,564 | 1,482.5 | 1,538.7 |
+| `client` (the patch) | 28,623 | 0 | 1,129.2 | 1,209.2 |
+
+**The buffer-read claim reproduces.** Client sorting cuts shared read blocks
+22.4% versus arrival order, matching `REPTILIAN.md`'s ~23% almost exactly, on a
+3.12-era workload rather than the original one.
+
+**The throughput claim still does not.** Client is only **1.4%** faster than
+arrival on elapsed time, and the per-run spreads overlap almost completely —
+arrival `[1187, 1254, 1260, 1204]` vs client `[1139, 1214, 1223, 1261]`. Client's
+worst run is slower than arrival's worst run. That is noise, not a throughput
+improvement.
+
+Client sorting does cleanly beat the `sql` alternative: identical buffer
+locality (28,623 vs 28,624 blocks) with **zero** temp spill against SQL's 1,564
+blocks, and ~350 ms less execution time. But the keep/remove comparison is
+client versus *arrival* — versus not carrying the patch at all — not client
+versus an alternative nobody proposed adopting.
+
+**Recommendation: remove.** #283's bar is explicit — retain "only with a
+material write-stall or throughput improvement." Less buffer I/O is real and
+reproducible, but it is not that bar, and this is the most expensive merge in
+the series (`PgStorage.res` is 289+/165- upstream). Removing it buys the single
+largest reduction in rebase risk for no demonstrated performance loss.
+
+Caveats, stated so the decision can be revisited honestly:
+
+- This is a single-table microbenchmark measuring `EXPLAIN ANALYZE` execution on
+  a laptop, not sustained production write stalls under concurrent load. #283
+  itself asks for write-stall and throughput comparison "after any deployment."
+- 32 MiB `shared_buffers` is deliberate cache pressure. Production buffers are
+  far larger, which would tend to *shrink* the buffer-read advantage further,
+  not grow it — so this setting is favorable to the patch, and it still did not
+  clear the bar.
+- If production write-stall telemetry later shows a real problem, the patch is
+  recoverable from `main` and the harness is unchanged.
 
 ## Explicitly out of scope
 
