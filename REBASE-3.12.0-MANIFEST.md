@@ -86,8 +86,44 @@ smaller than either number, for two reasons:
 
 ### Retain
 
-Carried forward. Each has a named runtime consumer in `REPTILIAN.md` or an
-environment variable chain-indexer actually sets.
+Carried forward. #283's acceptance criteria require that *every retained patch
+has a current chain-indexer consumer or measured benefit*. The consumer audit
+below was run against chain-indexer at `30b41e7` and the host repo, so several
+rows are now VERIFIED rather than carried on the ticket's word.
+
+**Consumer audit results**
+
+- **Telemetry hooks — VERIFIED, strong consumer.** The shipped Grafana board
+  graphs **37** `chain_indexer_*` series fed by the fork's `RuntimeHooks`,
+  including `chain_indexer_source_max_partition_concurrency_config`,
+  `..._max_chain_concurrency_config`, and `..._blocks_per_request_config`.
+  Shipping path confirmed: `orchestration/Dockerfile.grafana` does
+  `COPY orchestration/grafana/dashboards /etc/grafana/dashboards`, and the
+  Grafana service is defined in `render.reptilian-ops.yaml`. Note chain-indexer
+  retired *its* copy of this board in #290 as unshipped — the host's copy is the
+  live one, so the retirement does not weaken this evidence.
+- **`includeTimestamp` (#19) — VERIFIED, and upstream does not subsume it.**
+  Consumer is `src/handlers/rolling.ts:178,189`. Worth recording why the obvious
+  replacement fails: 3.12.0 adds `envio_progress_block_time_seconds` /
+  `_meta.progressBlockTime`, which looks like a drop-in for "avoid timestamp RPC
+  calls." It is not. Upstream's value is an *observability* readout of the block
+  each chain has progressed to, populated best-effort during realtime sync. The
+  heartbeat needs `block.timestamp` *inside* `onBlock` execution to drive
+  `observeDeploymentIdentity` and `advanceRollingWindow` entity writes on an
+  exact per-block clock. A metric observed outside handler execution cannot
+  carry that. Retain the patch.
+- **Concurrency and pacing knobs — VERIFIED.** `ENVIO_MAX_PARTITION_CONCURRENCY`,
+  `ENVIO_MAX_CHAIN_CONCURRENCY`, `ENVIO_SOURCE_BLOCKS_PER_REQUEST`,
+  `ENVIO_PROCESSING_BATCH_SIZE`, and `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` all have
+  live references in chain-indexer, and the first three export their configured
+  values as graphed metrics.
+- **Retry knobs — unexercised tuning surface.** `ENVIO_SOURCE_QUERY_MAX_RETRIES`
+  appears only in a runbook line and a telemetry comment;
+  `ENVIO_SOURCE_QUERY_RETRY_TIMEOUT_MILLIS` has **zero** references anywhere in
+  chain-indexer or the host. This does not by itself condemn the bounded-retry
+  patch — the behavior presumably runs on defaults and the knobs only tune it —
+  but confirm the defaults exist on the new base, and consider dropping the two
+  environment variables as dead configuration surface rather than porting them.
 
 | Patch | Behavior | Evidence |
 | --- | --- | --- |
@@ -118,7 +154,7 @@ not show a material benefit.
 | Cross-contract address-bound partition coalescing | `FetchState.OptimizedPartitions.coalesceAddressBoundPartitions` | NEEDS-BENCHMARK. Most invasive fork behavior; its former metadata bug caused silent launch-history loss. Upstream 3.11+ already does large-scale client-side address filtering. Low rebase cost (see churn table) but that is not a reason to keep it. If removed, `a00245a3a` and the mixed-partition test apparatus go with it. |
 | Sorted entity writes | `41c2159c6` (#20), `PgStorage.res` | NEEDS-BENCHMARK. Prior local run showed ~23% fewer shared-buffer reads at 32 MiB shared_buffers, with no proven sustained throughput gain. **Highest conflict cost in the series.** Harness already exists: `packages/envio/benchmarks/ordered-writes.mjs` (VERIFIED present). Decide this one first. |
 | `ENVIO_HYPERSYNC_HEAD_POLL_BLOCKS` | `0d1af4a0a` | NEEDS-BENCHMARK. Re-evaluate the traffic-vs-latency trade now that upstream 3.10 ships height-stream recovery. Currently permits bounded realtime lag by design. |
-| Telemetry duplicating upstream metrics | `RuntimeHooks` surface | NEEDS-BENCHMARK. Keep scheduler-specific visibility; drop generic fetch/storage stall instruments that upstream now covers. 3.12.0's new `envio_progress_block_time_seconds` may subsume part of the heartbeat story. |
+| Telemetry duplicating upstream metrics | `RuntimeHooks` surface | Scope narrowed by the consumer audit. 37 hook-fed series are graphed on the shipped board, so the surface is broadly live; the prune should be driven by that board's metric list rather than by reading the hook definitions. 3.12.0's `envio_progress_block_time_seconds` does **not** subsume the heartbeat (see Retain), and it is not novel for chain-indexer's external observer either — `scripts/indexer-observer.mjs:284,290` already derives `head` from an independent `getRpcHead` call, so its `blockLag` never depended on the source's claimed height. |
 | Simulated `blockLag: 0` | `SimulateItems.patchConfig` | TICKET. Keep only if a focused test shows behavior not expressible in test config. |
 
 ### Remove
