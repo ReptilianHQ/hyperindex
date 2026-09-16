@@ -5,6 +5,7 @@ type options = {
   endpointUrl: string,
   // The chain's registrations, indexed by their sequential `index`.
   onEventRegistrations: array<Internal.evmOnEventRegistration>,
+  onBlockRegistrations?: array<Internal.onBlockRegistration>,
   apiToken: option<string>,
   clientTimeoutMillis: int,
   lowercaseAddresses: bool,
@@ -20,6 +21,7 @@ let make = (
     chainId,
     endpointUrl,
     onEventRegistrations,
+    ?onBlockRegistrations,
     apiToken,
     clientTimeoutMillis,
     lowercaseAddresses,
@@ -104,6 +106,13 @@ let make = (
       ~registrationIndexes=selection.onEventRegistrations->Array.map(reg => reg.index),
       ~addressSet,
       ~clientFilteredContracts=selection.clientFilteredContracts,
+      ~includeAllBlocks=onBlockRegistrations
+      ->Option.getOr([])
+      ->Array.some(reg =>
+        reg.includeTimestamp->Option.getOr(false) &&
+        reg.startBlock->Option.getOr(0) <= toBlock->Option.getOr(knownHeight) &&
+        reg.endBlock->Option.getOr(toBlock->Option.getOr(knownHeight)) >= fromBlock
+      ),
     ) catch {
     | HyperSync.GetLogs.Error(WrongInstance) =>
       throw(Source.SourceBehindHead({blockNumber: fromBlock, requestStats: []}))
@@ -191,8 +200,8 @@ let make = (
 
   // Called through the client rather than passed as a value: the client is a
   // napi class, so a detached method reference loses the instance it belongs to.
-  let getBlockHashes = HyperSync.makeGetBlockHashes(
-    ~query=(~blockNumbers) => client.getBlockHashes(~blockNumbers),
+  let getBlockHashes = HyperSync.makeGetBlockHashes(~query=(~blockNumbers) =>
+    client.getBlockHashes(~blockNumbers)
   )
 
   {

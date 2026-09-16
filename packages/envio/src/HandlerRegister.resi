@@ -45,6 +45,7 @@ let defaultBlockRange: blockRange
 let registerOnBlock: (
   ~name: string,
   ~where: unknown,
+  ~includeTimestamp: bool=?,
   ~handler: Internal.onBlockArgs => promise<unit>,
   ~getChainsObject: Config.t => dict<unknown>,
 ) => unit

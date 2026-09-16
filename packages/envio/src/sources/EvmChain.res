@@ -41,6 +41,7 @@ let getSyncConfig = (
 
 let makeSources = (
   ~chainId,
+  ~onBlockRegistrations=[],
   ~onEventRegistrations: array<Internal.evmOnEventRegistration>,
   ~hyperSync,
   ~rpcs: array<rpc>,
@@ -53,6 +54,7 @@ let makeSources = (
         chainId,
         endpointUrl,
         onEventRegistrations,
+        onBlockRegistrations,
         apiToken: Env.envioApiToken,
         clientTimeoutMillis: Env.hyperSyncClientTimeoutMillis,
         lowercaseAddresses,

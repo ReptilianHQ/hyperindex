@@ -1,9 +1,15 @@
 // Sits below `ChainState`/`Persistence` in the module graph so that
 // `StartBlockResolver` (called from `Persistence.init`) can build a chain's
 // sources without a dependency cycle.
+// `onBlockRegistrations` is threaded through to the EVM sources so that a
+// registration opting into `includeTimestamp` reaches the HyperSync source,
+// which must then request block headers. Upstream extracted this module after
+// the fork's 3.9.0 base, so the parameter does not exist upstream; without it
+// the timestamp selection silently never activates.
 let make = (
   ~chainConfig: Config.chain,
   ~onEventRegistrations: array<Internal.onEventRegistration>,
+  ~onBlockRegistrations: array<Internal.onBlockRegistration>=[],
   ~addressStore: AddressStore.t,
   ~lowercaseAddresses: bool,
 ): array<Source.t> => {
@@ -24,6 +30,7 @@ let make = (
     })
     EvmChain.makeSources(
       ~chainId,
+      ~onBlockRegistrations,
       ~onEventRegistrations=onEventRegistrations->(
         Utils.magic: array<Internal.onEventRegistration> => array<Internal.evmOnEventRegistration>
       ),

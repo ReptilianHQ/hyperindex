@@ -616,6 +616,16 @@ let finishRegistration = (~config: Config.t): registrationsByChainId => {
 
         validateRpcFieldSelection(chainConfig, onEventRegistrations)
 
+        let blockRegs = (r->getChainRegistrations(~chainId)).onBlockRegistrations
+        if (
+          onEventRegistrations->Utils.Array.isEmpty &&
+            blockRegs->Array.some(reg => reg.includeTimestamp->Option.getOr(false))
+        ) {
+          JsError.throwWithMessage(
+            "includeTimestamp requires an event registration on the same chain",
+          )
+        }
+
         registrationsByChainId->Dict.set(
           key,
           {
@@ -736,6 +746,7 @@ type onBlockWhereArgs = {chain: unknown}
 let registerOnBlock = (
   ~name: string,
   ~where: unknown,
+  ~includeTimestamp=false,
   ~handler: Internal.onBlockArgs => promise<unit>,
   ~getChainsObject: Config.t => dict<unknown>,
 ) => {
@@ -796,6 +807,12 @@ let registerOnBlock = (
       }
 
       if shouldRegister {
+        if includeTimestamp {
+          switch chainConfig.sourceConfig {
+          | Config.EvmSourceConfig({hypersync: Some(_), rpcs: []}) => ()
+          | _ => JsError.throwWithMessage("includeTimestamp requires an EVM HyperSync-only source")
+          }
+        }
         matchedAny := true
         // Off the same object the predicate above was handed, not off
         // `chainConfig`: that one still says whatever config.yaml said, and for
@@ -822,6 +839,7 @@ let registerOnBlock = (
             {
               index: chainRegs.onBlockRegistrations->Array.length,
               name,
+              includeTimestamp: ?(includeTimestamp ? Some(true) : None),
               startBlock: range._gte,
               endBlock: range._lte,
               interval: range._every,

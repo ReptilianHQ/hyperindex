@@ -1122,7 +1122,8 @@ let fromPublic = (publicConfigJson: JSON.t) => {
     ecosystem,
     maxAddrInPartition,
     clientFilterAddressThreshold: Env.clientFilterAddressThreshold,
-    batchSize: publicConfig["fullBatchSize"]->Option.getOr(5000),
+    batchSize:
+      Env.processingBatchSize->Option.getOr(publicConfig["fullBatchSize"]->Option.getOr(5000)),
     reorgThresholdReadyTolerance: 100,
     lowercaseAddresses,
     isDev: publicConfig["isDev"]->Option.getOr(false),
@@ -1284,10 +1285,19 @@ let rec canonicalJson = (json: JSON.t): JSON.t =>
 
 // Returns dotted leaf paths (`a.b[i].c`) where `stored` differs from
 // `current`, restricted to the highest-priority top-level tier with any
-// diff. Tiers in order: version → name → storage → ecosystem
+// diff. Tiers in order: version → chainIdMode → name → storage → ecosystem
 // (evm/fuel/svm) → entities → other top-level keys. The first tier
 // containing a diff is the only one rendered; lower tiers are silenced
 // so a single noisy section doesn't bury the actionable change.
+//
+// The version tier compares the upstream base version only: the fork's
+// `-reptilian.N` suffix changes on every fork release without changing the
+// stored data contract, so `3.9.0-reptilian.1` resumes on `3.9.0-reptilian.2`.
+// A base upgrade is still reported, since upstream may have changed what it
+// stores without any structural key below differing.
+let forkVersionSuffix = %re("/-reptilian\.\d+$/")
+let baseVersion = (version: string) => version->String.replaceRegExp(forkVersionSuffix, "")
+
 let diffPaths = (~stored: JSON.t, ~current: JSON.t): array<string> => {
   let canonEq = (a: JSON.t, b: JSON.t) =>
     JSON.stringify(canonicalJson(a)) === JSON.stringify(canonicalJson(b))
@@ -1350,8 +1360,13 @@ let diffPaths = (~stored: JSON.t, ~current: JSON.t): array<string> => {
     // chainIdMode sits right after version: it decides the physical type of
     // every chain-id column, so a change to it is reported on its own rather
     // than buried under the chain diffs that always accompany it.
+    let versionDiffers = switch (getTopKey(stored, "version"), getTopKey(current, "version")) {
+    | (Some(String(s)), Some(String(c))) => baseVersion(s) !== baseVersion(c)
+    | (None, None) => false
+    | (None, Some(_)) | (Some(_), None) => true
+    | (Some(s), Some(c)) => !canonEq(s, c)
+    }
     let tiers = [
-      ["version"],
       ["chainIdMode"],
       ["name"],
       ["storage"],
@@ -1369,9 +1384,10 @@ let diffPaths = (~stored: JSON.t, ~current: JSON.t): array<string> => {
       }
     )
     switch firstHit {
+    | _ if versionDiffers => acc->Array.push("version")->ignore
     | Some(hits) => runTier(hits)
     | None =>
-      let knownSet = Utils.Set.fromArray(tiers->Array.flat)
+      let knownSet = Utils.Set.fromArray(Array.concat(["version"], tiers->Array.flat))
       let extras =
         Utils.Set.fromArray(Array.concat(sObj->Dict.keysToArray, cObj->Dict.keysToArray))
         ->Utils.Set.toArray

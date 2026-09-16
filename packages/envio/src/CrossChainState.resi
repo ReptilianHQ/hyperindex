@@ -5,7 +5,12 @@ type t
 
 let calculateTargetBufferSize: unit => int
 
-let make: (~chainStates: dict<ChainState.t>, ~isRealtime: bool, ~targetBufferSize: int=?) => t
+let make: (
+  ~chainStates: dict<ChainState.t>,
+  ~isRealtime: bool,
+  ~targetBufferSize: int=?,
+  ~sourceBlocksPerRequest: option<int>=?,
+) => t
 
 // Accessors.
 let chainStates: t => dict<ChainState.t>

@@ -1013,9 +1013,9 @@ export type EvmOnBlockContext<Config extends IndexerConfigTypes = GlobalConfig> 
 
 /** Arguments passed to an EVM block handler. */
 export type EvmOnBlockHandlerArgs<Config extends IndexerConfigTypes = GlobalConfig> = {
-  /** Block being processed. Contains the block number; extended fields are
-      opt-in via `field_selection` in config.yaml. */
-  readonly block: { readonly number: number };
+  /** Block being processed. includeTimestamp supplies the canonical timestamp in
+   * seconds, including empty blocks. Otherwise timestamp is undefined. */
+  readonly block: { readonly number: number; readonly timestamp?: number };
   /** Handler context: entity operations, logger, effect caller, chain state. */
   readonly context: EvmOnBlockContext<Config>;
 };
@@ -1027,6 +1027,9 @@ export type EvmOnBlockHandler<Config extends IndexerConfigTypes = GlobalConfig> 
 
 /** Options for an EVM `indexer.onBlock` registration. */
 export type EvmOnBlockOptions<Config extends IndexerConfigTypes = GlobalConfig> = {
+  /** Request source timestamps. Requires a HyperSync-only chain with event
+   * registrations. Defaults to false; requests headers for queries overlapping this handler's range. */
+  readonly includeTimestamp?: boolean;
   /** Unique name for this block handler. Used as the key in error messages
       and in persisted progress tracking. */
   readonly name: string;

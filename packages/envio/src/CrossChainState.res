@@ -17,6 +17,7 @@ type t = {
   mutable isCaughtUp: bool,
   // Indexer-wide fetch buffer pool (item count), shared across all chains.
   targetBufferSize: int,
+  sourceBlocksPerRequest: option<int>,
 }
 
 // The whole-indexer fetch buffer pool, independent of chain count.
@@ -26,13 +27,19 @@ let calculateTargetBufferSize = () =>
   | None => 100_000
   }
 
-let make = (~chainStates, ~isRealtime, ~targetBufferSize=calculateTargetBufferSize()): t => {
+let make = (
+  ~chainStates,
+  ~isRealtime,
+  ~targetBufferSize=calculateTargetBufferSize(),
+  ~sourceBlocksPerRequest=Env.sourceBlocksPerRequest,
+): t => {
   {
     chainStates,
     chainIds: chainStates->Dict.valuesToArray->Array.map(cs => (cs->ChainState.chainConfig).id),
     isRealtime,
     isCaughtUp: isRealtime,
     targetBufferSize,
+    sourceBlocksPerRequest,
   }
 }
 
@@ -109,14 +116,29 @@ let createBatch = (
   ~frontier,
   ~batchSizeTarget: int,
 ): Batch.t => {
-  Batch.make(
-    ~sequence=config.checkpointSequence,
-    ~history=config->HistoryPolicy.decide(~shouldSaveHistory=crossChainState->shouldSaveHistory),
-    ~frontier,
-    ~chainsBeforeBatch=crossChainState.chainStates->Utils.Dict.mapValues(
-      ChainState.toChainBeforeBatch,
-    ),
-    ~batchSizeTarget,
+  // Fork: the batch fill stays wrapped in the phase-trace hook. Upstream
+  // reworked Batch.make's arguments after 3.9.0 (it now takes the checkpoint
+  // sequence, history policy and frontier, and no longer takes
+  // isInReorgThreshold/checkpointIdBeforeBatch), so the call inside the wrapper
+  // is upstream's, not the fork's.
+  let attributes = Dict.make()
+  attributes->Dict.set("chain.indexer.batch.ready_items", crossChainState->totalReadyCount)
+  attributes->Dict.set("chain.indexer.batch.target_items", batchSizeTarget)
+  RuntimeHooks.tracePhase(
+    "batch_fill",
+    () =>
+      Batch.make(
+        ~sequence=config.checkpointSequence,
+        ~history=config->HistoryPolicy.decide(
+          ~shouldSaveHistory=crossChainState->shouldSaveHistory,
+        ),
+        ~frontier,
+        ~chainsBeforeBatch=crossChainState.chainStates->Utils.Dict.mapValues(
+          ChainState.toChainBeforeBatch,
+        ),
+        ~batchSizeTarget,
+      ),
+    ~attributes,
   )
 }
 
@@ -354,7 +376,12 @@ let checkAndFetch = async (
         Some(cs->ChainState.blockAtProgress(~progress=progress +. alignmentMargin))
       | _ => None
       }
-      switch cs->ChainState.getNextQuery(~chainTargetItems, ~maxTargetBlock?) {
+      switch cs->ChainState.getNextQuery(
+        ~chainTargetItems,
+        ~maxTargetBlock?,
+        ~isRealtime=crossChainState.isRealtime,
+        ~sourceBlocksPerRequest=crossChainState.sourceBlocksPerRequest,
+      ) {
       | WaitingForNewBlock as action => actionByChain->ChainId.Dict.set(chainId, action)
       | NothingToQuery =>
         // A chain below its head can emit no query when its budget went to

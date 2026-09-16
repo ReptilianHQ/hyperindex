@@ -1,4 +1,5 @@
 let makeClient = () => {
+  RuntimeHooks.recordPoolConfig(Env.Db.maxConnections)
   Postgres.makeSql(
     ~config={
       host: Env.Db.host,
@@ -1432,101 +1433,120 @@ let rec writeBatch = async (
 
     try {
       let _ = await Promise.all2((
-        sql->Postgres.beginSql(async sql => {
-          //Rollback tables need to happen first in the traction
-          switch rollbackTables {
-          | Some(rollbackTables) =>
-            let _ = await rollbackTables(sql)
-          | None => ()
-          }
+        RuntimeHooks.traceStorage("TRANSACTION", () =>
+          RuntimeHooks.tracePoolAcquisition(onAcquired =>
+            sql->Postgres.beginSql(
+              async sql => {
+                onAcquired()
+                await RuntimeHooks.tracePhase(
+                  "pre_commit",
+                  async () => {
+                    //Rollback tables need to happen first in the traction
+                    switch rollbackTables {
+                    | Some(rollbackTables) =>
+                      let _ = await rollbackTables(sql)
+                    | None => ()
+                    }
 
-          let setOperations = [
-            sql =>
-              sql->InternalTable.Chains.setProgressedChains(
-                ~pgSchema,
-                ~progressedChains=batch.progressedChainsById->Utils.Dict.mapValuesToArray((
-                  chainAfterBatch
-                ): InternalTable.Chains.progressedChain => {
-                  chainId: chainAfterBatch.fetchState.chainId,
-                  progressBlockNumber: chainAfterBatch.progressBlockNumber,
-                  progressBlockTime: chainAfterBatch.progressBlockTime,
-                  sourceBlockNumber: chainAfterBatch.sourceBlockNumber,
-                  totalEventsProcessed: chainAfterBatch.totalEventsProcessed,
-                }),
-              ),
-            setRawEvents,
-          ]->Array.concat(setEntities)
+                    let setOperations = [
+                      sql =>
+                        sql->InternalTable.Chains.setProgressedChains(
+                          ~pgSchema,
+                          ~progressedChains=batch.progressedChainsById->Utils.Dict.mapValuesToArray(
+                            (chainAfterBatch): InternalTable.Chains.progressedChain => {
+                              chainId: chainAfterBatch.fetchState.chainId,
+                              progressBlockNumber: chainAfterBatch.progressBlockNumber,
+                              progressBlockTime: chainAfterBatch.progressBlockTime,
+                              sourceBlockNumber: chainAfterBatch.sourceBlockNumber,
+                              totalEventsProcessed: chainAfterBatch.totalEventsProcessed,
+                            },
+                          ),
+                        ),
+                      setRawEvents,
+                    ]->Array.concat(setEntities)
 
-          switch chainMetaData {
-          | Some(chainsData) =>
-            setOperations
-            ->Array.push(sql =>
-              sql->InternalTable.Chains.setMeta(~pgSchema, ~chainsData)->Utils.Promise.ignoreValue
+                    switch chainMetaData {
+                    | Some(chainsData) =>
+                      setOperations
+                      ->Array.push(
+                        sql =>
+                          sql
+                          ->InternalTable.Chains.setMeta(~pgSchema, ~chainsData)
+                          ->Utils.Promise.ignoreValue,
+                      )
+                      ->ignore
+                    | None => ()
+                    }
+
+                    if registeredAddresses->Utils.Array.notEmpty {
+                      setOperations->Array.push(
+                        sql =>
+                          sql->InternalTable.EnvioAddresses.insert(
+                            ~pgSchema,
+                            ~rows=registeredAddresses->Array.map(staged => staged.row),
+                            ~chainIdMode,
+                          ),
+                      )
+                    }
+
+                    if !(writtenFrontier->Utils.Dict.isEmpty) {
+                      setOperations->Array.push(sql =>
+                        sql->InternalTable.Chains.setCheckpointFrontier(
+                          ~pgSchema,
+                          ~frontier=writtenFrontier,
+                          ~chainIdMode,
+                        )
+                      )
+                    }
+
+                    switch pickedCheckpoints {
+                    | Some(picked) =>
+                      setOperations->Array.push(sql =>
+                        sql->InternalTable.Checkpoints.insert(
+                          ~pgSchema,
+                          ~checkpointIds=batch.checkpointIds->pickCheckpoints(picked),
+                          ~checkpointChainIds=batch.checkpointChainIds->pickCheckpoints(picked),
+                          ~checkpointBlockNumbers=batch.checkpointBlockNumbers->pickCheckpoints(picked),
+                          ~checkpointBlockHashes=batch.checkpointBlockHashes->pickCheckpoints(picked),
+                          ~checkpointEventsProcessed=batch.checkpointEventsProcessed->pickCheckpoints(picked),
+                          ~chainIdMode,
+                        )
+                      )
+                    | None => ()
+                    }
+
+                    await setOperations
+                    ->Array.map(dbFunc => sql->dbFunc)
+                    ->Promise.all
+                    ->Utils.Promise.ignoreValue
+
+                    switch sinkPromise {
+                    | Some(sinkPromise) =>
+                      switch await sinkPromise {
+                      | Some(exn) => throw(exn)
+                      | None => ()
+                      }
+                    | None => ()
+                    }
+                  },
+                )
+              },
             )
-            ->ignore
-          | None => ()
-          }
-
-          if registeredAddresses->Utils.Array.notEmpty {
-            setOperations->Array.push(sql =>
-              sql->InternalTable.EnvioAddresses.insert(
-                ~pgSchema,
-                ~rows=registeredAddresses->Array.map(staged => staged.row),
-                ~chainIdMode,
-              )
-            )
-          }
-
-          if !(writtenFrontier->Utils.Dict.isEmpty) {
-            setOperations->Array.push(sql =>
-              sql->InternalTable.Chains.setCheckpointFrontier(
-                ~pgSchema,
-                ~frontier=writtenFrontier,
-                ~chainIdMode,
-              )
-            )
-          }
-
-          switch pickedCheckpoints {
-          | Some(picked) =>
-            setOperations->Array.push(sql =>
-              sql->InternalTable.Checkpoints.insert(
-                ~pgSchema,
-                ~checkpointIds=batch.checkpointIds->pickCheckpoints(picked),
-                ~checkpointChainIds=batch.checkpointChainIds->pickCheckpoints(picked),
-                ~checkpointBlockNumbers=batch.checkpointBlockNumbers->pickCheckpoints(picked),
-                ~checkpointBlockHashes=batch.checkpointBlockHashes->pickCheckpoints(picked),
-                ~checkpointEventsProcessed=batch.checkpointEventsProcessed->pickCheckpoints(picked),
-                ~chainIdMode,
-              )
-            )
-          | None => ()
-          }
-
-          await setOperations
-          ->Array.map(dbFunc => sql->dbFunc)
-          ->Promise.all
-          ->Utils.Promise.ignoreValue
-
-          switch sinkPromise {
-          | Some(sinkPromise) =>
-            switch await sinkPromise {
-            | Some(exn) => throw(exn)
-            | None => ()
-            }
-          | None => ()
-          }
-        }),
+          )
+        ),
         // Since effect cache currently doesn't support rollback,
         // we can run it outside of the transaction for simplicity.
-        updatedEffectsCache
-        ->Array.map((
-          {table, itemSchema, items, shouldInitialize}: Persistence.updatedEffectCache,
-        ) => {
-          setEffectCacheOrThrow(~table, ~itemSchema, ~items, ~initialize=shouldInitialize)
-        })
-        ->Promise.all,
+        RuntimeHooks.tracePhase("effects_cache", () =>
+          updatedEffectsCache
+          ->Array.map((
+            {table, itemSchema, items, shouldInitialize}: Persistence.updatedEffectCache,
+          ) => {
+            setEffectCacheOrThrow(~table, ~itemSchema, ~items, ~initialize=shouldInitialize)
+          })
+          ->Promise.all
+        ),
       ))
+      RuntimeHooks.traceStorage("COMMIT", () => ())
 
       // Just in case, if there's a not PG-specific error.
       switch specificError.contents {

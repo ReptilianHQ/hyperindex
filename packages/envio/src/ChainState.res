@@ -273,8 +273,16 @@ let makeInternal = (
     }
   })
 
+  if (
+    onBlockRegistrations->Array.some(reg => reg.includeTimestamp->Option.getOr(false)) &&
+      fetchState.optimizedPartitions->FetchState.OptimizedPartitions.count == 0
+  ) {
+    JsError.throwWithMessage("includeTimestamp requires an active event fetch partition")
+  }
+
   // Create sources lazily here - this is where API token validation happens
   let sources = ChainSources.make(
+    ~onBlockRegistrations,
     ~chainConfig,
     ~onEventRegistrations,
     ~addressStore,
@@ -477,6 +485,20 @@ let startFetchingQueries = (cs: t, ~queries: array<FetchState.query>) => {
     queries->Array.reduce(0., (acc, query) => acc +. query.itemsEst->Int.toFloat)
 }
 
+// Frees the slot and the buffer reservation of a query that never resolved,
+// the same pair startFetchingQueries took. False when nothing was pending for
+// it: the response already landed, or a rollback dropped the queue.
+let releaseInFlightQuery = (cs: t, ~query: FetchState.query) =>
+  switch cs.fetchState->FetchState.releaseInFlightQuery(
+    ~partitionId=query.partitionId,
+    ~fromBlock=query.fromBlock,
+  ) {
+  | Some(itemsEst) =>
+    cs.pendingBudget = Pervasives.max(0., cs.pendingBudget -. itemsEst->Int.toFloat)
+    true
+  | None => false
+  }
+
 // Drop every in-flight query and release their reservations together, keeping
 // pendingBudget coupled to the pending queries it tracks.
 let resetPendingQueries = (cs: t) => {
@@ -597,7 +619,13 @@ let frontierProgress = (cs: t) =>
 // maxTargetBlock set to the most-behind chain's progress mapped onto this
 // chain, so a chain with budget can't run further ahead than the chain the
 // whole pool is prioritizing.
-let getNextQuery = (cs: t, ~chainTargetItems: float, ~maxTargetBlock=?) => {
+let getNextQuery = (
+  cs: t,
+  ~chainTargetItems: float,
+  ~maxTargetBlock=?,
+  ~isRealtime=false,
+  ~sourceBlocksPerRequest=Env.sourceBlocksPerRequest,
+) => {
   let chainTargetBlock = cs->targetBlock(~chainTargetItems)
   let chainTargetBlock = switch maxTargetBlock {
   | Some(maxTargetBlock) => Pervasives.min(chainTargetBlock, maxTargetBlock)
@@ -618,7 +646,14 @@ let getNextQuery = (cs: t, ~chainTargetItems: float, ~maxTargetBlock=?) => {
   // budget to the cold-chain cap, so it's used as-is.
   | _ => chainTargetItems
   }
-  cs.fetchState->FetchState.getNextQuery(~chainTargetBlock, ~chainTargetItems)
+  cs.fetchState->FetchState.getNextQuery(
+    ~chainTargetBlock,
+    ~chainTargetItems,
+    ~isRealtime,
+    ~configuredSourceBlocksPerRequest=sourceBlocksPerRequest,
+    ~hyperSyncHeadPollBlocks=Env.hyperSyncHeadPollBlocks,
+    ~willQueryHyperSync=cs.sourceManager->SourceManager.willQueryHyperSync(~isRealtime),
+  )
 }
 
 // Run a fetch tick for this chain against its sources, feeding the owned fetch
@@ -773,9 +808,7 @@ let groupBatchItems = (items: array<Internal.item>): (transactionGroups, blockGr
           blockItemGroups->Array.push([eventItem])
         }
       }
-    // onBlock items build their block from the handler's own block number, not
-    // from the stores - which is what lets the sources keep only the blocks and
-    // transactions an event item references.
+    // Block callback timestamps are materialised separately at batch prep.
     | Internal.Block(_) => ()
     }
   )
@@ -840,12 +873,46 @@ let applyBlockGroups = async (store: BlockStore.t, g: blockGroups) => {
 // batch's items at batch prep (the persistent-store path). A single pass over
 // `items` (`groupBatchItems`) builds both stores' selection masks before the
 // two independent materialize calls run concurrently.
+@get external getSourceTimestamp: Internal.eventBlock => Nullable.t<int> = "timestamp"
+
+let materializeBlockTimestamps = async (store, items) => {
+  let blockItems = items->Array.filter(item =>
+    switch item {
+    | Internal.Block({onBlockRegistration}) =>
+      onBlockRegistration.includeTimestamp->Option.getOr(false)
+    | _ => false
+    }
+  )
+  if blockItems->Utils.Array.notEmpty {
+    let mask = Evm.eventBlockFieldMask(Utils.Set.fromArray(["timestamp"]))
+    let blocks = await store->BlockStore.materialize(
+      ~blockNumbers=blockItems->Array.map(Internal.getItemBlockNumber),
+      ~masks=blockItems->Array.map(_ => mask),
+    )
+    blockItems->Array.forEachWithIndex((item, i) => {
+      let timestamp = blocks->Array.getUnsafe(i)->getSourceTimestamp->Nullable.toOption
+      if timestamp->Option.isNone {
+        JsError.throwWithMessage("Required onBlock source timestamp is unavailable")
+      }
+      item->Internal.setItemBlockTimestamp(timestamp)
+    })
+  }
+}
+
 let materializeBatchItems = async (cs: t, ~items: array<Internal.item>) => {
   let (txGroups, blockGroups) = items->groupBatchItems
   let _ = await Promise.all2((
     cs.transactionStore->applyTransactionGroups(txGroups),
     cs.blockStore->applyBlockGroups(blockGroups),
   ))
+  if (
+    switch cs.chainConfig.sourceConfig {
+    | Config.EvmSourceConfig(_) => true
+    | _ => false
+    }
+  ) {
+    await materializeBlockTimestamps(cs.blockStore, items)
+  }
 }
 
 // Materialise a fetch-response's transactions and blocks onto its items before

@@ -91,7 +91,7 @@ let runHandlerOrThrow = async (
   ~chains: Internal.chains,
 ) => {
   switch item {
-  | Block({onBlockRegistration: {handler}, blockNumber}) =>
+  | Block({onBlockRegistration: {handler}, blockNumber, ?timestamp}) =>
     try {
       let contextParams: UserContext.contextParams = {
         item,
@@ -107,6 +107,7 @@ let runHandlerOrThrow = async (
       await handler(
         Ecosystem.makeOnBlockArgs(
           ~blockNumber,
+          ~timestamp?,
           ~ecosystem=config.ecosystem,
           ~context=UserContext.getHandlerContext(contextParams),
         ),
@@ -206,12 +207,13 @@ let preloadBatchOrThrow = async (
           | _ => ()
           }
         }
-      | Block({onBlockRegistration: {handler}, blockNumber}) =>
+      | Block({onBlockRegistration: {handler}, blockNumber, ?timestamp}) =>
         try {
           promises->Array.push(
             handler({
               Ecosystem.makeOnBlockArgs(
                 ~blockNumber,
+                ~timestamp?,
                 ~ecosystem=config.ecosystem,
                 ~context=UserContext.getHandlerContext({
                   item,
@@ -348,32 +350,32 @@ let processEventBatch = async (
 
   try {
     // Backpressure: keep processing within keepLatestChangesLimit of the cycle.
-    await indexerState->Writing.awaitCapacity
+    await RuntimeHooks.tracePhase("capacity_wait", () => indexerState->Writing.awaitCapacity)
 
     let timeRef = Performance.now()
 
     if batch.items->Utils.Array.notEmpty {
       // Materialise store-backed transactions onto payloads before any handler
       // (preload or execute) reads them.
-      await materializeBatchEvents(batch, ~chainStates)
-      await batch->preloadBatchOrThrow(~loadManager, ~persistence, ~indexerState, ~chains, ~config)
+      await RuntimeHooks.tracePhase("materialize", () =>
+        materializeBatchEvents(batch, ~chainStates)
+      )
+      await RuntimeHooks.tracePhase("preload", () =>
+        batch->preloadBatchOrThrow(~loadManager, ~persistence, ~indexerState, ~chains, ~config)
+      )
     }
 
     let elapsedTimeAfterLoaders = timeRef->Performance.secondsSince
 
     if batch.items->Utils.Array.notEmpty {
-      await batch->runBatchHandlersOrThrow(
-        ~indexerState,
-        ~loadManager,
-        ~persistence,
-        ~config,
-        ~chains,
+      await RuntimeHooks.tracePhase("handlers", () =>
+        batch->runBatchHandlersOrThrow(~indexerState, ~loadManager, ~persistence, ~config, ~chains)
       )
     }
 
     let elapsedTimeAfterProcessing = timeRef->Performance.secondsSince
 
-    indexerState->Writing.commitBatch(~batch)
+    RuntimeHooks.tracePhase("queue", () => indexerState->Writing.commitBatch(~batch))
 
     let loaderDuration = elapsedTimeAfterLoaders
     let handlerDuration = elapsedTimeAfterProcessing -. loaderDuration
