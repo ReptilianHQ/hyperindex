@@ -211,17 +211,23 @@ let makeInternal = (
     ->Utils.Dict.dangerouslyGetNonOption(chainConfig.id->ChainId.toString)
     ->Option.getOr({onEventRegistrations: [], onBlockRegistrations: []})
 
-  chainConfig.contracts->Array.forEach(contract => {
-    switch contract.startBlock {
-    // Against the resolved `~startBlock`, which came from storage:
-    // `chainConfig.startBlock` still says whatever config.yaml said.
-    | Some(contractStartBlock) if contractStartBlock < startBlock =>
-      JsError.throwWithMessage(
-        `The start block for contract "${contract.name}" is less than the chain start block. This is not supported yet.`,
-      )
-    | _ => ()
-    }
-  })
+  // Fork: only a fresh start can have a contract configured below the chain's
+  // start block. Upstream compares against the resolved `~startBlock`, which on
+  // a resume is the stored progress point rather than what config.yaml said —
+  // so a contract legitimately configured from block 1 trips this the moment the
+  // chain resumes past it, even though those blocks are already indexed.
+  // `MixedPartitionCoverage_hegel_test`'s resumed replay is exactly that case.
+  if !isResumed {
+    chainConfig.contracts->Array.forEach(contract => {
+      switch contract.startBlock {
+      | Some(contractStartBlock) if contractStartBlock < startBlock =>
+        JsError.throwWithMessage(
+          `The start block for contract "${contract.name}" is less than the chain start block. This is not supported yet.`,
+        )
+      | _ => ()
+      }
+    })
+  }
 
   let lowercaseAddresses = config.lowercaseAddresses
   // Created before the fetch state and the sources: `make` registers this
