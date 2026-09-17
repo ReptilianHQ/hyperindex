@@ -84,6 +84,24 @@ describe("Config.stripSensitiveData", () => {
 })
 
 describe("Config.diffPaths", () => {
+  it("allows a fork-release upgrade when the base version is unchanged", t => {
+    let stored = json(`{"version": "3.9.0-reptilian.1", "name": "demo", "entities": []}`)
+    let current = json(`{"version": "3.9.0-reptilian.2", "name": "demo", "entities": []}`)
+    t.expect(Config.diffPaths(~stored, ~current), ~message="fork-suffix-only upgrade").toEqual([])
+  })
+
+  it("still reports structural changes across a fork-release upgrade", t => {
+    let stored = json(`{"version": "3.9.0-reptilian.1", "name": "old", "entities": []}`)
+    let current = json(`{"version": "3.9.0-reptilian.2", "name": "new", "entities": []}`)
+    t.expect(Config.diffPaths(~stored, ~current), ~message="structural change").toEqual(["name"])
+  })
+
+  it("reports a base version upgrade ahead of everything else", t => {
+    let stored = json(`{"version": "3.6.1-reptilian.10", "name": "old", "entities": []}`)
+    let current = json(`{"version": "3.9.0-reptilian.1", "name": "new", "entities": []}`)
+    t.expect(Config.diffPaths(~stored, ~current), ~message="base upgrade").toEqual(["version"])
+  })
+
   it("returns [] for structurally equal JSON regardless of key order", t => {
     let stored = json(`{"a": {"x": 1, "y": 2}, "b": [1, 2, 3]}`)
     let current = json(`{"b": [1, 2, 3], "a": {"y": 2, "x": 1}}`)

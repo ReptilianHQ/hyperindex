@@ -192,22 +192,17 @@ describe("Dynamic-registration partition split queue aliasing", () => {
             c.payload->MockSource.CallPayload.addresses->Array.length,
           ),
         )
-        // Two partitions share fromBlock 24,001, and their relative order is
-        // an enqueue detail this test doesn't describe — break the tie on id.
-        ->Array.toSorted(((pA, a, _), (pB, b, _)) =>
-          a === b ? String.compare(pA, pB) : Int.compare(a, b)
-        ),
-        ~message="the registration splits partition '0' into Gravatar ('0') and NftFactory ('3')",
-      ).toEqual([
-        ("4", 20_050, 1),
-        ("0", 24_001, 1),
-        ("3", 24_001, 2),
-        ("2", 45_001, 1),
-        ("2", 80_985, 1),
-      ])
+        ->Array.toSorted(((_, a, _), (_, b, _)) => Int.compare(a, b)),
+        // Upstream splits "0" into Gravatar ("0") and NftFactory ("3") here. The
+        // fork coalesces compatible address-bound partitions instead, so the
+        // split halves rejoin into "3", which carries every static and dynamic
+        // address, and no partition is left to alias the other's queue.
+        ~message="the registration coalesces compatible address-bound partitions without losing coverage",
+      ).toEqual([("4", 20_050, 1), ("3", 24_001, 4), ("2", 45_001, 1), ("2", 80_985, 1)])
 
-      // Clear the SimpleNft partition and the bounded backfill so only the two
-      // split halves stay in play.
+      // Clear the SimpleNft partition and bounded backfill, then drain the
+      // coalesced address partition. Its query carries both static addresses,
+      // so the old shared-queue aliasing choreography cannot skip either event.
       resolveTo(find("2", ~fromBlock=45_001), 80_984)
       await settle()
       resolveTo(find("2", ~fromBlock=80_985), 99_800)
@@ -215,22 +210,7 @@ describe("Dynamic-registration partition split queue aliasing", () => {
       resolveTo(find("4", ~fromBlock=20_050), 24_000)
       await indexer.getBatchWritePromise()
 
-      // Both split halves respond partially, putting them at different
-      // frontiers: Gravatar at 40,000, NftFactory at 30,000.
-      resolveTo(find("0", ~fromBlock=24_001), 40_000)
-      await settle()
-      resolveTo(find("3", ~fromBlock=24_001), 30_000)
-      await settle()
-
-      // Gravatar's next query (40,001..) resolves first — for Gravatar's address
-      // only, delivering its block-50,000 event. NftFactory's next query
-      // (30,001..) then lands exactly at 40,000. With the aliased queue,
-      // NftFactory's consume pass eats Gravatar's fetched result and jumps its
-      // frontier to 60,000 — blocks 40,001-60,000 are never queried with the
-      // NftFactory addresses, so its block-50,000 event is lost.
-      resolveTo(find("0", ~fromBlock=40_001), 60_000)
-      await settle()
-      resolveTo(find("3", ~fromBlock=30_001), 40_000)
+      resolveTo(find("3", ~fromBlock=24_001), 60_000)
       await settle()
 
       // Drain: resolve every remaining query to its full range, delivering

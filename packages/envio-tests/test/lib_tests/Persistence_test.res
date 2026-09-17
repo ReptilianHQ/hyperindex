@@ -440,6 +440,43 @@ Pick one:
     },
   )
 
+  Async.it(
+    "Fork release suffix changes are informational; the highest structural tier is shown",
+    async t => {
+      // The fork publishes 3.9.0-reptilian.N; only the base version is compared,
+      // so a fork release resumes and the name diff is what gets reported.
+      let stored = JSON.parseOrThrow(`{
+        "version": "3.9.0-reptilian.1",
+        "name": "old",
+        "storage": {"a": 1},
+        "entities": [{"name": "A"}]
+      }`)
+      let current = JSON.parseOrThrow(`{
+        "version": "3.9.0-reptilian.2",
+        "name": "new",
+        "storage": {"b": 2},
+        "entities": [{"name": "B"}]
+      }`)
+      let (_, message, _) = await resumeWith(~storedEnvioInfo=Some(stored), ~current)
+      t.expect(
+        message,
+        ~message="the fork suffix is ignored and lower tiers are suppressed by the name diff",
+      ).toBe(
+        `The following config changes are incompatible with the existing indexer data:
+
+    - name
+
+Pick one:
+  1. Revert the changes above  # resume indexing where it left off
+  2. envio dev -r              # delete all indexed data and start over
+  3. Run a second indexer alongside this one — keep both datasets:
+       ENVIO_PG_SCHEMA=<new_schema> \\
+       ENVIO_INDEXER_PORT=<new_port> \\
+       envio dev`,
+      )
+    },
+  )
+
   Async.it("Fallback: unknown top-level keys are rendered when no known tier differs", async t => {
     let stored = JSON.parseOrThrow(`{"name": "x", "customA": 1, "customB": {"k": 1}}`)
     let current = JSON.parseOrThrow(`{"name": "x", "customA": 2, "customB": {"k": 2}}`)

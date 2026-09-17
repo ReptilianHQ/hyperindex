@@ -4,6 +4,7 @@ open Vitest
 // every other field is overridden at the call site.
 let defaultQuery: FetchState.query = {
   partitionId: "0",
+  rangeReason: TestAddresses.anyRangeReason,
   fromBlock: 0,
   toBlock: None,
   isChunk: false,
@@ -202,6 +203,7 @@ describe("SourceManager source priority with Live sources", () => {
 
   let mockQuery = (): FetchState.query => {
     partitionId: "0",
+    rangeReason: TestAddresses.anyRangeReason,
     itemsTarget: Some(5000),
     itemsEst: 5000,
     fromBlock: 0,
@@ -562,6 +564,7 @@ describe("SourceManager fetchNext", () => {
       ).toEqual([
         {
           partitionId: "2",
+          rangeReason: FetchState.Adaptive,
           itemsTarget: Some(16_667),
           itemsEst: 16_667,
           fromBlock: 2,
@@ -572,6 +575,7 @@ describe("SourceManager fetchNext", () => {
         },
         {
           partitionId: "0",
+          rangeReason: FetchState.Adaptive,
           // Starts at block 5 vs partition "2"'s block 2, so it covers less of
           // the range to the target and gets a smaller probe.
           itemsTarget: Some(11_111),
@@ -584,6 +588,7 @@ describe("SourceManager fetchNext", () => {
         },
         {
           partitionId: "1",
+          rangeReason: FetchState.Adaptive,
           // Starts furthest ahead (block 6), so it gets the smallest probe.
           itemsTarget: Some(9_259),
           itemsEst: 9_259,
@@ -1453,6 +1458,7 @@ describe("SourceManager.executeQuery", () => {
 
   let mockQuery = (): FetchState.query => {
     partitionId: "0",
+    rangeReason: TestAddresses.anyRangeReason,
     itemsTarget: Some(5000),
     itemsEst: 5000,
     fromBlock: 0,
@@ -1842,7 +1848,9 @@ Retries 2 times on fallback, switches back to sync (oldest lastFailedAt).
     async t => {
       let syncMock = MockSource.make([#getHeightOrThrow, #getItemsOrThrow])
       let fallbackMock = MockSource.make([#getHeightOrThrow, #getItemsOrThrow], ~sourceFor=Fallback)
-      let recoveryTimeout = 5.0
+      // Long enough that the three zero-backoff retries below cannot span it
+      // on a loaded runner (5ms did, and the primary "recovered" mid-test).
+      let recoveryTimeout = 200.0
       let sourceManager = SourceManager.make(
         ~isRealtime=false,
         ~recoveryTimeout,
@@ -3203,6 +3211,7 @@ describe("SourceManager height subscription", () => {
         isChunk: false,
         selection: {dependsOnAddresses: false, onEventRegistrations: []},
         addresses: TestAddresses.setOf([]),
+        rangeReason: TestAddresses.anyRangeReason,
       },
       ~isRealtime=true,
       ~knownHeight=100,

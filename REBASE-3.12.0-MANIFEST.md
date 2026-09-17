@@ -303,10 +303,54 @@ separately approved compatibility plan.
 Entity-level invalidation, selective projection rebuilds, and checkpoint seeding
 remain [chain-indexer#247](https://github.com/ReptilianHQ/chain-indexer/issues/247).
 
+## Port status
+
+The retained series is applied on this branch. The fork's net delta was applied
+against the 3.12.0 base with a 3-way merge and the resulting conflicts resolved
+individually, rather than merging the old fork branch wholesale.
+
+**Conflicts resolved: 17.** Thirteen in the ReScript runtime, two in the Rust
+CLI, two in the ReScript tests. The consistent shape was *fork wrapper, upstream
+body*: the fork's telemetry wraps call sites upstream reworked after 3.9.0, so
+the hooks are preserved while the calls inside them are upstream's —
+`Batch.make` (now `sequence`/`history`/`frontier`, no
+`isInReorgThreshold`/`checkpointIdBeforeBatch`), `writeBatch` (no
+`isInReorgThreshold`), `ensureQueryIndexes` (now `~entityConfig`/`~scope`),
+`committedCheckpointIdFor(~scope)`, `initEffectOutputFromDb` (now `~chainId`),
+and the progressed-chain record (now carries `progressBlockTime`).
+
+**One gap required porting, not conflict resolution.** Upstream extracted source
+construction into `ChainSources.make` after 3.9.0, and neither it nor
+`EvmChain.makeSources` accepts `onBlockRegistrations`. Patch #19 needs those to
+reach the HyperSync source so a handler opting into `includeTimestamp` gets block
+headers requested. `EvmChain.makeSources` defaults the parameter to `[]`, so the
+omission **compiles and fails silently** — the rolling heartbeat would simply
+never receive timestamps. `ChainSources.make` now takes and forwards it, and
+`REPTILIAN.md` records it as a fork requirement on this base.
+
+**Two defects the builds caught**, neither visible to the runtime compile:
+
+- an upstream-added `SourceManager_test` case omitted `rangeReason`, which the
+  fork's query record makes required;
+- `mock_hypersync_server.rs` called `request.body.bytes()`. `body` was a `String`
+  on the 3.9.0 base and is a `Vec<u8>` on 3.12.0.
+
+**Verification:** `rescript build` clean for the runtime (148 modules) and the
+test package (212 modules); `cargo check --all-targets` clean. The vitest suite
+requires PostgreSQL on port 5433 (`postgres`/`testing`, database `envio-dev`).
+
+Release identity is `3.12.0-reptilian.N`. Both publish gates were updated — the
+tag trigger and the version-validation regex in `publish.yml`, which pinned
+`^3\.9\.0-reptilian\.` and would have rejected the new line on its own.
+
 ## Next steps
 
-1. Run `packages/envio/benchmarks/ordered-writes.mjs` to settle sorted writes —
-   cheapest decision, highest conflict payoff.
-2. Benchmark coalescing against stock 3.12 on a representative replay.
-3. Apply the retained series individually onto `rebase/3.12.0`.
-4. Only then bump `chain-indexer`'s `envio` alias pin.
+1. Get the vitest suite green, `MixedPartitionCoverage_hegel_test` above all —
+   keeping coalescing makes that test the guard against the silent
+   launch-history loss its original bug caused.
+2. Prune telemetry that duplicates upstream, driven panel-by-panel from the
+   shipped Grafana board's metric list rather than from the hook definitions.
+3. Benchmark coalescing against stock 3.12 if its keep decision is ever revisited.
+4. Only then bump `chain-indexer`'s `envio` alias pin — and note the compatibility
+   policy: this is a `3.9 -> 3.12` base change, so it lands with a fresh-schema
+   replay, not as a runtime-only swap on a populated schema.

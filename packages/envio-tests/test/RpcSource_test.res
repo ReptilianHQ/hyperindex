@@ -1,10 +1,17 @@
 open Vitest
 open Internal
 
-let testApiToken =
-  Env.envioApiToken->Option.getOrThrow(
-    ~message="ENVIO_API_TOKEN env var must be set to run RpcSource tests",
-  )
+let testApiToken = Env.envioApiToken->Option.getOr("")
+let hasLiveApiToken = testApiToken !== "" && testApiToken !== "offline-tests"
+
+// A case that talks to a live endpoint: skipped in offline runs, and retried
+// as upstream configured it when a real token makes it run.
+let itLive = (name, ~retry, body) =>
+  if hasLiveApiToken {
+    Async.itWithOptions(name, {retry: retry}, body)
+  } else {
+    Async.it_skip(name, body)
+  }
 
 let mockLog = (
   ~transactionHash="0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef",
@@ -50,7 +57,7 @@ describe("RpcSource - name", () => {
 })
 
 describe("RpcSource - getHeightOrThrow", () => {
-  Async.itWithOptions("Returns the current height of the chain", {retry: 3}, async t => {
+  itLive("Returns the current height of the chain", ~retry=3, async t => {
     let source = RpcSource.make({
       url: `https://eth.rpc.hypersync.xyz/${testApiToken}`,
       chainId: 1337->ChainId.fromInt,
@@ -160,7 +167,9 @@ describe("RpcSource - getEventTransactionOrThrow", () => {
     })
   })
 
-  Async.it("Queries transaction fields from raw JSON (with real RPC)", async t => {
+  Async.it_skipIf(!hasLiveApiToken)(
+    "Queries transaction fields from raw JSON (with real RPC)",
+    async t => {
     let testTransactionHash = "0x3dce529e9661cfb65defa88ae5cd46866ddf39c9751d89774d89728703c2049f"
 
     let rpcUrl = `https://eth.rpc.hypersync.xyz/${testApiToken}`
@@ -231,9 +240,9 @@ describe("RpcSource - getEventTransactionOrThrow", () => {
     },
   )
 
-  Async.itWithOptions(
+  itLive(
     "Successfully fetches ZKSync EIP-712 transactions (type 0x71) with optional signature fields",
-    {retry: 3},
+    ~retry=3,
     async t => {
       // Transaction from Abstract Testnet (ZKSync-based) that lacks r/s/v signature fields
       let testTransactionHash = "0x245134326b7fecdcb7e0ed0a6cf090fc8881a63420ecd329ef645686b85647ed"
@@ -725,7 +734,9 @@ describe("RpcSource - getEventBlockOrThrow", () => {
     t.expect(result).toEqual(%raw(`{"baseFeePerGas": 1000000000n, "difficulty": 17179869184n}`))
   })
 
-  Async.it("Queries block fields from raw JSON (with real RPC)", async t => {
+  Async.it_skipIf(!hasLiveApiToken)(
+    "Queries block fields from raw JSON (with real RPC)",
+    async t => {
     let rpcUrl = `https://eth.rpc.hypersync.xyz/${testApiToken}`
     let client = Rpc.makeClient(rpcUrl)
 

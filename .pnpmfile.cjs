@@ -1,7 +1,7 @@
 // When CI artifacts are present, redirect envio dependencies from the
 // dev workspace member (packages/envio) to the pre-built artifact in
 // .envio-artifacts/envio. Also redirect the platform binary package
-// (envio-linux-x64) to its local artifact. In normal dev this is a no-op.
+// (@reptilianhq/envio-linux-x64) to its local artifact. In normal dev this is a no-op.
 const fs = require("fs");
 const path = require("path");
 
@@ -28,11 +28,11 @@ if (fs.existsSync(ARTIFACT_DIR)) {
       }
     }
 
-    // Redirect envio-linux-x64 in the artifact's optionalDependencies
+    // Redirect the scoped envio-linux-x64 in the artifact's optionalDependencies
     // to the local platform NAPI addon artifact. The path is relative to
     // the envio package directory (.envio-artifacts/envio/).
-    if (pkg.name === "envio" && pkg.optionalDependencies?.["envio-linux-x64"]) {
-      pkg.optionalDependencies["envio-linux-x64"] = "file:../envio-linux-x64";
+    if (pkg.name === "envio" && pkg.optionalDependencies?.["@reptilianhq/envio-linux-x64"]) {
+      pkg.optionalDependencies["@reptilianhq/envio-linux-x64"] = "file:../envio-linux-x64";
     }
 
     return pkg;

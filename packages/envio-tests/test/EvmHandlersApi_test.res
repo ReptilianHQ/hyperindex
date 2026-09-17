@@ -546,11 +546,12 @@ import { expectType, type TypeEqual } from "ts-expect";
 expectType<TypeEqual<EvmOnBlockContext, EvmOnEventContext>>(true);
 const _blockOpts: EvmOnBlockOptions = {
   name: "b",
+  includeTimestamp: true,
   where: ({ chain }) => (chain.id === 1 ? true : false),
 };
 expectType<EvmOnBlockOptions>(_blockOpts);
 expectType<
-  TypeEqual<EvmOnBlockHandlerArgs["block"], { readonly number: number }>
+  TypeEqual<EvmOnBlockHandlerArgs["block"], { readonly number: number; readonly timestamp?: number }>
 >(true);
 expectType<TypeEqual<EvmOnBlockHandlerArgs["context"], EvmOnBlockContext>>(true);
 expectType<

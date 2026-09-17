@@ -1,3 +1,25 @@
+// Offline runs build HyperSync sources without a real token; the live tests
+// (RpcSource, SourceBlockHashes, HyperSync*) recognise this placeholder and
+// skip themselves.
+process.env.ENVIO_API_TOKEN ||= "offline-tests";
+
+// This public-API fixture uses a real local HyperSync server, whose request
+// decoder accepts JSON. Set its process-local transport before Env is loaded.
+const { expect } = await import("vitest");
+if (expect.getState().testPath?.match(/\/(OnBlockTimestamp|MixedPartitionCoverage_hegel)_test\.res\.mjs$/)) {
+  process.env.ENVIO_API_TOKEN = "00000000-0000-0000-0000-000000000000";
+  process.env.ENVIO_HYPERSYNC_CLIENT_SERIALIZATION_FORMAT = "Json";
+  process.env.ENVIO_HYPERSYNC_CLIENT_ENABLE_QUERY_CACHING = "false";
+}
+
+if (expect.getState().testPath?.endsWith("/MixedPartitionCoverage_hegel_test.res.mjs")) {
+  process.env.ENVIO_CLIENT_FILTER_ADDRESS_THRESHOLD = "4";
+  process.env.MAX_PARTITION_SIZE = "5";
+  process.env.ENVIO_MAX_CHAIN_CONCURRENCY = "4";
+  process.env.ENVIO_MAX_PARTITION_CONCURRENCY = "4";
+}
+
 // Importing Env triggers Logging.setLogger as a side effect,
 // ensuring the logger is available for all tests.
-import "envio/src/Env.res.mjs";
+// A dynamic import: a static one is hoisted above the env default.
+await import("envio/src/Env.res.mjs");

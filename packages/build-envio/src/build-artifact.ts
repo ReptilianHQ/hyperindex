@@ -85,11 +85,11 @@ export function buildPackageJson(
   // field in each platform package's package.json to skip the wrong flavor
   // on Linux (glibc vs musl).
   pkg.optionalDependencies = {
-    "envio-linux-x64": platformPkgVersion,
-    "envio-linux-x64-musl": platformPkgVersion,
-    "envio-linux-arm64": platformPkgVersion,
-    "envio-darwin-x64": platformPkgVersion,
-    "envio-darwin-arm64": platformPkgVersion,
+    "@reptilianhq/envio-linux-x64": platformPkgVersion,
+    "@reptilianhq/envio-linux-x64-musl": platformPkgVersion,
+    "@reptilianhq/envio-linux-arm64": platformPkgVersion,
+    "@reptilianhq/envio-darwin-x64": platformPkgVersion,
+    "@reptilianhq/envio-darwin-arm64": platformPkgVersion,
   };
 
   return pkg;

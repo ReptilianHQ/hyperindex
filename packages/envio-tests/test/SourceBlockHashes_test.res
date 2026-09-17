@@ -1,9 +1,8 @@
 open Vitest
 
-let testApiToken =
-  Env.envioApiToken->Option.getOrThrow(
-    ~message="ENVIO_API_TOKEN env var must be set to run SourceBlockHashes integration tests",
-  )
+let testApiToken = Env.envioApiToken->Option.getOr("")
+let hasLiveApiToken = testApiToken !== "" && testApiToken !== "offline-tests"
+let describeLive = if hasLiveApiToken {describe} else {describe_skip}
 
 // Ethereum mainnet.
 let chainId = 1->ChainId.fromInt
@@ -166,7 +165,7 @@ let assertContainsBlockHash = (
 let storedBlockNumbers = (blockStore: BlockStore.t) =>
   blockStore->BlockStore.getHashedBlockNumbers(~fromBlock=0, ~belowBlock=2147483647)
 
-describe("Source.blockHashes integration - empty range", () => {
+describeLive("Source.blockHashes integration - empty range", () => {
   // Uniswap V2 Factory was deployed at block 10000835. Anything well below that
   // is guaranteed to have zero matching PairCreated logs.
   let fromBlock = 100
@@ -219,7 +218,7 @@ describe("Source.blockHashes integration - empty range", () => {
   )
 })
 
-describe("Source.blockHashes integration - single-log range", () => {
+describeLive("Source.blockHashes integration - single-log range", () => {
   // Ethereum mainnet block 17915919 contains exactly one PairCreated event from
   // the Uniswap V2 Factory. Confirmed by hand against eth.rpc.hypersync.xyz.
   let fromBlock = 17915919
