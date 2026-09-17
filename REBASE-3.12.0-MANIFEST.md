@@ -336,8 +336,35 @@ never receive timestamps. `ChainSources.make` now takes and forwards it, and
   on the 3.9.0 base and is a `Vec<u8>` on 3.12.0.
 
 **Verification:** `rescript build` clean for the runtime (148 modules) and the
-test package (212 modules); `cargo check --all-targets` clean. The vitest suite
-requires PostgreSQL on port 5433 (`postgres`/`testing`, database `envio-dev`).
+test package (212 modules); `cargo check --all-targets` clean. Vitest: **173 of
+193 files passing, 1635 tests**. The only three failures are upstream's new SVM
+*live* tests, which require `ENVIO_API_TOKEN` and fail identically on stock
+v3.12.0 offline. The suite needs PostgreSQL on port 5433 (`postgres`/`testing`,
+database `envio-dev`).
+
+**One real regression was found and fixed, and it was upstream's, not the
+rebase's.** `MixedPartitionCoverage_hegel_test` passes 3/3 on `main` and its
+resumed-replay case failed here. 3.12.0 compares a contract's configured
+`start_block` against the *resolved* chain start block rather than the
+config.yaml value; on a resume the resolved value is the stored progress point,
+so a contract legitimately configured from block 1 trips
+"The start block for contract X is less than the chain start block" the moment
+the chain resumes past it. The guard is now gated on `!isResumed` — a
+distinction `makeInternal` already carried, since `makeFromDbState` passes
+`~isResumed=true`. A fresh start keeps the validation.
+
+Two things about how that surfaced are worth carrying forward. It presented as a
+120-second timeout; under `LOG_LEVEL=trace` the same case failed in 400ms with an
+explicit message, because the hang was Hegel retrying 20 generated cases against
+a throwing indexer rather than anything being slow — raising the deadline would
+have buried it. And neither compile caught it: both packages built clean. Only
+running the fork's own coverage against the new base found a change that would
+have shipped as an indexer refusing to resume.
+
+This patch diverges from deliberate upstream behaviour and should be raised with
+Envio rather than carried silently: either resuming past a contract's configured
+start block is meant to be forbidden, which is a real constraint for any
+resuming indexer, or it is a bug they would want reported.
 
 Release identity is `3.12.0-reptilian.N`. Both publish gates were updated — the
 tag trigger and the version-validation regex in `publish.yml`, which pinned
