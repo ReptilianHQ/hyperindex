@@ -112,6 +112,7 @@ let callEffect = (
 
   effect.handler(arg)
   ->Promise.thenResolve(output => {
+    inMemTable.stats->EffectState.recordFetchedOutput(~shouldCache=arg.context.cache)
     inMemTable->InMemoryStore.setEffectOutput(
       ~checkpointId=arg.checkpointId,
       ~cacheKey=arg.cacheKey,

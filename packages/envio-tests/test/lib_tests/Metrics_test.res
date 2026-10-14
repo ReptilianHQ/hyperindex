@@ -91,6 +91,7 @@ envio_info{version="${Utils.EnvioPackage.value.version}"} 1
           callSeconds: 0.,
           callSecondsTotal: 0.,
           callCount: 2.,
+          fetchedRowsCount: 0.,
           activeCallsCount: 0,
           queueCount: 0,
           queueWaitSeconds: 0.,
@@ -182,6 +183,7 @@ envio_info{version="${Utils.EnvioPackage.value.version}"} 1
           callSeconds: 8.4,
           callSecondsTotal: 20.9,
           callCount: 300.,
+          fetchedRowsCount: 123.,
           activeCallsCount: 1,
           queueCount: 4,
           queueWaitSeconds: 1.75,
@@ -450,6 +452,10 @@ envio_effect_call_total{effect="getMetadata",scope="crossChain"} 300
 # HELP envio_effect_active_calls The number of Effect function calls that are currently running.
 # TYPE envio_effect_active_calls gauge
 envio_effect_active_calls{effect="getMetadata",scope="crossChain"} 1
+
+# HELP envio_effect_cache_fetched_total Successful cache-enabled effect outputs returned during this process, including refetches. One output is one cache row; excludes failures and cache hits. Not committed cache inserts or provider RPC requests.
+# TYPE envio_effect_cache_fetched_total counter
+envio_effect_cache_fetched_total{effect="getMetadata",scope="crossChain"} 123
 
 # HELP envio_effect_cache The number of items in the effect cache.
 # TYPE envio_effect_cache gauge
