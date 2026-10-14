@@ -38,6 +38,10 @@ enum ContractImportResponse {
     },
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_recursion generates must_use on a boxed Future that is already must_use"
+)]
 #[async_recursion]
 pub async fn contract_import(
     network: &NetworkWithExplorer,

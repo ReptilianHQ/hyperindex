@@ -145,6 +145,10 @@ enum AutoConfigError {
     ContractNameExists { name: String },
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_recursion generates must_use on a boxed Future that is already must_use"
+)]
 #[async_recursion]
 pub async fn prompt_to_continue_adding<T, CF, CFut>(
     contracts: &mut Vec<T>,

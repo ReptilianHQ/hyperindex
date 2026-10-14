@@ -163,3 +163,4 @@ or Blueprint to deploy directly.
 ## Fork change log
 
 - 2026-10-14: Measure successful cache-enabled effect outputs independently of calls and cache occupancy.
+- 2026-10-14: Preserve strict CLI linting while accounting for generated recursive-future attributes.
