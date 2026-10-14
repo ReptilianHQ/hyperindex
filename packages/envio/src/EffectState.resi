@@ -36,6 +36,8 @@ let resetForRollback: t => unit
 
 let startCall: (effectStats, ~timerRef: Performance.timeRef) => unit
 let endCall: (effectStats, ~startTimerRef: Performance.timeRef) => unit
+// Record one successfully returned cache-enabled output; refetches count again.
+let recordFetchedOutput: (effectStats, ~shouldCache: bool) => unit
 let queueEnqueued: (effectStats, ~count: int) => unit
 let queueDequeued: (effectStats, ~count: int) => unit
 let addQueueWaitSeconds: (effectStats, ~seconds: float) => unit

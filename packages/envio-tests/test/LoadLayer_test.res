@@ -831,6 +831,38 @@ describe("LoadLayer", () => {
 })
 
 describe("LoadLayer effect cache", () => {
+  Async.it("counts returned cache-enabled outputs, excluding cache hits and failed attempts", async t => {
+    let storageMock = MockStorage.make([#loadOrThrow])
+    let loadManager = LoadManager.make()
+    let indexerState = TestIndexerState.make(~config)
+    let effect = Envio.createEffect(
+      {name: "fetchedRows", input: S.string, output: S.string, cache: true, rateLimit: Disable},
+      async ({input}) => {
+        if input === "fail" { JsError.throwWithMessage("expected fetch failure") }
+        input
+      },
+    )->(Utils.magic: Envio.effect<string, string> => Internal.effect)
+    let call = (input, shouldCache) => LoadLayer.loadEffect(
+      ~loadManager,
+      ~persistence=storageMock->MockStorage.toPersistence(~config),
+      ~effect,
+      ~effectArgs={input: input->(Utils.magic: string => Internal.effectInput),
+        context: {"cache": shouldCache}->(Utils.magic: {..} => Internal.effectContext),
+        cacheKey: input, checkpointId: 0n},
+      ~scope=Internal.CrossChain,
+      ~indexerState,
+      ~shouldGroup=true,
+      ~item,
+      ~ecosystem=config.ecosystem,
+    )
+    let _ = await call("cached", true)
+    let _ = await call("cached", true)
+    let _ = await call("plain", false)
+    let rejected = try { let _ = await call("fail", true); false } catch { | _ => true }
+    let metrics = indexerState->IndexerState.effectState->EffectState.toMetrics
+    let metric = metrics[0]->Option.getOrThrow
+    t.expect((rejected, metric.callCount, metric.fetchedRowsCount)).toEqual((true, 3., 1.))
+  })
   // Reproduces an envio v3.1.0-rc.x regression: an effect with an *optional*
   // output that resolves to None leaks the ReScript nested-option sentinel
   // `{ BS_PRIVATE_NESTED_SOME_NONE: 0 }` instead of JS `undefined`. The

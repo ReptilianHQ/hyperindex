@@ -24,6 +24,9 @@ type effectStats = {
   // Cumulative per-call time; exceeds callSeconds under parallel execution.
   mutable callSecondsTotal: float,
   mutable callCount: float,
+  // Successful cache-enabled outputs returned by the effect handler. Counts
+  // refetches individually; independent of cache occupancy and failed calls.
+  mutable fetchedRowsCount: float,
   mutable activeCallsCount: int,
   mutable prevCallStartTimerRef: Performance.timeRef,
   mutable queueCount: int,
@@ -112,6 +115,12 @@ let endCall = (stats: effectStats, ~startTimerRef) => {
 
 let queueEnqueued = (stats: effectStats, ~count) => stats.queueCount = stats.queueCount + count
 
+let recordFetchedOutput = (stats: effectStats, ~shouldCache) => {
+  if shouldCache {
+    stats.fetchedRowsCount = stats.fetchedRowsCount +. 1.
+  }
+}
+
 let queueDequeued = (stats: effectStats, ~count) => stats.queueCount = stats.queueCount - count
 
 let addQueueWaitSeconds = (stats: effectStats, ~seconds) =>
@@ -135,6 +144,7 @@ let statsToMetrics = (stats: effectStats): Metrics.effectMetrics => {
   callSeconds: stats.callSeconds,
   callSecondsTotal: stats.callSecondsTotal,
   callCount: stats.callCount,
+  fetchedRowsCount: stats.fetchedRowsCount,
   activeCallsCount: stats.activeCallsCount,
   queueCount: stats.queueCount,
   queueWaitSeconds: stats.queueWaitSeconds,
@@ -156,6 +166,7 @@ let toMetrics = (self: t): array<Metrics.effectMetrics> => {
       callSeconds: 0.,
       callSecondsTotal: 0.,
       callCount: 0.,
+      fetchedRowsCount: 0.,
       activeCallsCount: 0,
       queueCount: 0,
       queueWaitSeconds: 0.,
@@ -183,6 +194,7 @@ let getTable = (self: t, ~effect: Internal.effect, ~scope: Internal.chainScope) 
       callSeconds: 0.,
       callSecondsTotal: 0.,
       callCount: 0.,
+      fetchedRowsCount: 0.,
       activeCallsCount: 0,
       prevCallStartTimerRef: %raw(`null`),
       queueCount: 0,

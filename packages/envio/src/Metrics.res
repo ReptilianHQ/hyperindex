@@ -54,6 +54,7 @@ type effectMetrics = {
   callSeconds: float,
   callSecondsTotal: float,
   callCount: float,
+  fetchedRowsCount: float,
   activeCallsCount: int,
   queueCount: int,
   queueWaitSeconds: float,
@@ -593,6 +594,13 @@ let renderMetrics = (b: builder, metrics: t) => {
     ~kind="gauge",
     ~entries=effects,
     ~value=s => s->ifCalled(s.activeCallsCount->Int.toFloat),
+  )
+  b->series(
+    ~name="envio_effect_cache_fetched_total",
+    ~help="Successful cache-enabled effect outputs returned during this process, including refetches. One output is one cache row; excludes failures and cache hits. Not committed cache inserts or provider RPC requests.",
+    ~kind="counter",
+    ~entries=effects,
+    ~value=s => s.fetchedRowsCount,
   )
   // Only effects that persist their cache get a sample (including a zero for
   // an existing but empty persisted table); a plain effect gets none.

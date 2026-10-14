@@ -9,6 +9,17 @@ N-API addon are built from the same commit, and the addon loader
 (`Core.res`) resolves only the scoped names, so a runtime must never load a
 native package from another fork release.
 
+`envio_effect_cache_fetched_total{effect,scope}` independently counts successful
+cache-enabled outputs returned by effect handlers during the process. One
+output is one cache row, regardless of records nested inside its payload.
+Refetches count again; cached reads and failed attempts do not increment it.
+The counter survives rollback alongside the other per-effect counters and
+starts at zero for each process, including cache-only entries loaded at startup.
+It is independent of cache occupancy, which can fall during invalidation. It
+does not count committed cache inserts or provider RPC requests. Runtime
+restarts need separate process-generation evidence; partial scrape windows
+must not be presented as whole-run totals.
+
 The fork is carried as a patch series on top of the upstream tag, re-applied on
 each base upgrade (the `3.6.1-reptilian.N` line preceded this one). It retains
 the application-specific runtime behavior that upstream does not provide:
@@ -148,3 +159,8 @@ Compile `packages/envio-tests` and run `MixedPartitionCoverage_hegel_test`,
 `DynamicContractPersistence_test`. Release ownership remains Build & Verify and
 the versioned publish workflow described above; this library has no Render service
 or Blueprint to deploy directly.
+
+## Fork change log
+
+- 2026-10-14: Measure successful cache-enabled effect outputs independently of calls and cache occupancy.
+- 2026-10-14: Preserve strict CLI linting while accounting for generated recursive-future attributes.

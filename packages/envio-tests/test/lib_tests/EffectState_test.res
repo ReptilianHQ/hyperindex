@@ -6,6 +6,21 @@ let makeEffect = (~name, ~rateLimit=Envio.Disable): Internal.effect =>
     async ({input}) => input,
   )->(Utils.magic: Envio.effect<string, string> => Internal.effect)
 
+describe("Fetched effect outputs", () => {
+  it("survives cache occupancy changes and rollback without counting uncached outputs", t => {
+    let state = EffectState.make()
+    let table = state->EffectState.getTable(~effect=makeEffect(~name="fetched"), ~scope=CrossChain)
+    table.stats->EffectState.recordFetchedOutput(~shouldCache=true)
+    table.stats->EffectState.recordFetchedOutput(~shouldCache=false)
+    table->EffectState.commitCacheCount(~count=99)
+    state->EffectState.resetForRollback
+    let afterRollback = (state->EffectState.toMetrics)[0]->Option.getOrThrow
+    table.stats->EffectState.recordFetchedOutput(~shouldCache=true)
+    let afterRefetch = (state->EffectState.toMetrics)[0]->Option.getOrThrow
+    t.expect((afterRollback.fetchedRowsCount, afterRefetch.fetchedRowsCount)).toEqual((1., 2.))
+  })
+})
+
 describe("EffectState rollback", () => {
   it("clears the cache in place but keeps stats and the rate-limit window", t => {
     let self = EffectState.make()
@@ -51,6 +66,7 @@ describe("EffectState rollback", () => {
           callSeconds: 0.,
           callSecondsTotal: 0.,
           callCount: 0.,
+          fetchedRowsCount: 0.,
           activeCallsCount: 0,
           queueCount: 4,
           queueWaitSeconds: 0.,
@@ -69,6 +85,7 @@ describe("EffectState unregistered cache count", () => {
     callSeconds: 0.,
     callSecondsTotal: 0.,
     callCount: 0.,
+    fetchedRowsCount: 0.,
     activeCallsCount: 0,
     queueCount: 0,
     queueWaitSeconds: 0.,
